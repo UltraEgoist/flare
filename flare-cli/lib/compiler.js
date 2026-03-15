@@ -232,7 +232,13 @@ class TypeChecker {
   check(){this.buildSymbols();this.checkScript();this.checkTemplate(this.c.template);this.checkUnused();return this.diags;}
   buildSymbols(){for(const d of this.c.script){switch(d.kind){case'state':this.symbols.set(d.name,{type:d.type,source:'state'});break;case'prop':this.symbols.set(d.name,{type:d.type,source:'prop'});break;case'computed':this.symbols.set(d.name,{type:d.type,source:'computed'});break;case'fn':this.symbols.set(d.name,{type:d.returnType||{kind:'primitive',name:'void'},source:'fn'});break;case'emit':this.symbols.set(d.name,{type:d.type,source:'emit'});break;case'ref':this.symbols.set(d.name,{type:d.type,source:'ref'});break;case'type':this.typeAliases.set(d.name,d.type);break;}}}
   checkScript(){for(const d of this.c.script)if(d.kind==='state'){const t=this.infer(d.init);if(t&&!this.assignable(t,d.type))this.diags.push({level:'error',code:'E0201',message:`state '${d.name}' の初期値の型が一致しません`,span:d.span});}}
-  checkTemplate(nodes){for(const n of nodes){if(n.kind==='interpolation')this.checkInterp(n);else if(n.kind==='element'){n.attrs.forEach(a=>{if(a.dynamic||a.bind)this.checkVars(a.value);});this.checkTemplate(n.children);}else if(n.kind==='if'){this.checkVars(n.condition);this.checkTemplate(n.children);if(n.elseChildren)this.checkTemplate(n.elseChildren);}else if(n.kind==='for'){this.checkVars(n.of);this.symbols.set(n.each,{type:{kind:'primitive',name:'string'},source:'loop'});if(n.index)this.symbols.set(n.index,{type:{kind:'primitive',name:'number'},source:'loop'});this.checkTemplate(n.children);if(n.emptyChildren)this.checkTemplate(n.emptyChildren);this.symbols.delete(n.each);if(n.index)this.symbols.delete(n.index);}}}
+  checkTemplate(nodes){for(const n of nodes){if(n.kind==='interpolation')this.checkInterp(n);else if(n.kind==='element'){n.attrs.forEach(a=>{
+    if(a.dynamic||a.bind)this.checkVars(a.value);
+    // Security: warn about @html usage
+    if(a.html)this.diags.push({level:'warning',code:'W0201',message:`@html はエスケープされません。XSSリスクがあるため、信頼できるデータのみ使用してください`});
+    // Security: warn about dynamic href/src (potential javascript: URL injection)
+    if(a.dynamic&&(a.name==='href'||a.name==='src'))this.diags.push({level:'warning',code:'W0202',message:`動的な :${a.name} は javascript: URL インジェクションのリスクがあります。入力を検証してください`});
+  });this.checkTemplate(n.children);}else if(n.kind==='if'){this.checkVars(n.condition);this.checkTemplate(n.children);if(n.elseChildren)this.checkTemplate(n.elseChildren);}else if(n.kind==='for'){this.checkVars(n.of);this.symbols.set(n.each,{type:{kind:'primitive',name:'string'},source:'loop'});if(n.index)this.symbols.set(n.index,{type:{kind:'primitive',name:'number'},source:'loop'});this.checkTemplate(n.children);if(n.emptyChildren)this.checkTemplate(n.emptyChildren);this.symbols.delete(n.each);if(n.index)this.symbols.delete(n.index);}}}
   checkInterp(n){const m=n.expr.match(/^(\w+)\.(\w+)\(/);if(m){const sym=this.symbols.get(m[1]);if(sym&&sym.type.kind==='primitive'){const strM=['toUpperCase','toLowerCase','trim','split','replace','includes','startsWith','endsWith','indexOf','slice'];if(sym.type.name==='number'&&strM.includes(m[2]))this.diags.push({level:'error',code:'E0302',message:`'${m[1]}' は 'number' 型ですが、'${m[2]}' メソッドはありません`,hint:`String(${m[1]}) に変換してください`});}}this.checkVars(n.expr);}
   checkVars(expr){const reserved=new Set(['true','false','null','undefined','void','typeof','instanceof','new','return','if','else','for','while','const','let','var','function','class','this','super','import','export','from','await','async','try','catch','finally','throw','length','map','filter','reduce','push','pop','trim','includes','indexOf','slice','splice','concat','join','split','toFixed','toString','toUpperCase','toLowerCase','replace','match','startsWith','endsWith','parseInt','parseFloat','String','Number','Boolean','Array','Object','Math','JSON','console','window','document','fetch','Promise','Date','Error','event','e','r','s','i','t','n','ok','data','error','index']);
     // Strip string literals before extracting identifiers
@@ -384,6 +390,8 @@ function generate(c) {
         const txExpr = loopCtx ? txLoop(a.value, loopCtx) : tx(a.value);
         if(a.name==='class')as+=` class="\${this.#escAttr(Object.entries(${txExpr}).filter(([,v])=>v).map(([k])=>k).join(' '))}"`;
         else if(['disabled','checked','hidden'].includes(a.name))as+=` \${${txExpr} ? '${a.name}' : ''}`;
+        // Security: sanitize href/src to block javascript: and data: URLs
+        else if(['href','src','action','formaction'].includes(a.name))as+=` ${a.name}="\${this.#escUrl(${txExpr})}"`;
         else as+=` ${a.name}="\${this.#escAttr(${txExpr})}"`;
       } else {
         as+=a.value?` ${a.name}="${a.value}"`:` ${a.name}`;
@@ -658,6 +666,14 @@ function generate(c) {
   o+=`    const s = String(val);\n`;
   o+=`    if (!/[&<>"'`+'`]/.test(s)) return s;\n';
   o+=`    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\`/g,'&#96;');\n`;
+  o+=`  }\n\n`;
+
+  // #escUrl - URL sanitization (blocks javascript:, data:, vbscript: URLs)
+  o+=`  #escUrl(val) {\n`;
+  o+=`    if (val == null) return '';\n`;
+  o+=`    const s = String(val).trim();\n`;
+  o+=`    if (/^\\s*(javascript|data|vbscript)\\s*:/i.test(s)) return 'about:blank';\n`;
+  o+=`    return this.#escAttr(s);\n`;
   o+=`  }\n`;
 
   o+=`}\n\n`;

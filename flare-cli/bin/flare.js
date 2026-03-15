@@ -340,6 +340,17 @@ function cmdDev() {
     let url = req.url === '/' ? '/index.html' : req.url;
     url = url.split('?')[0];
 
+    // Security: decode and normalize path, block path traversal
+    url = decodeURIComponent(url);
+    if (url.includes('\0') || /\.\./.test(url)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      res.end('403 Forbidden');
+      return;
+    }
+
+    // Allowed root directories for serving files
+    const allowedRoots = [path.resolve(htmlDir), path.resolve(outDir), path.resolve(process.cwd())];
+
     // Try multiple locations
     const candidates = [
       path.join(htmlDir, url),
@@ -353,14 +364,18 @@ function cmdDev() {
     }
 
     for (const filePath of candidates) {
-      if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-        const ext = path.extname(filePath);
+      const resolved = path.resolve(filePath);
+      // Security: ensure resolved path is within an allowed root
+      if (!allowedRoots.some(root => resolved.startsWith(root + path.sep) || resolved === root)) continue;
+      if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+        const ext = path.extname(resolved);
         const mime = MIME[ext] || 'application/octet-stream';
         res.writeHead(200, {
           'Content-Type': mime + '; charset=utf-8',
           'Cache-Control': 'no-cache',
+          'X-Content-Type-Options': 'nosniff',
         });
-        fs.createReadStream(filePath).pipe(res);
+        fs.createReadStream(resolved).pipe(res);
         return;
       }
     }
