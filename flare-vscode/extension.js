@@ -13,9 +13,17 @@ function activate(context) {
   diagnosticCollection = vscode.languages.createDiagnosticCollection('flare');
   context.subscriptions.push(diagnosticCollection);
 
+  // Debounced diagnostics for real-time feedback while typing
+  let diagTimer = null;
+  function debouncedDiag(doc) {
+    if (diagTimer) clearTimeout(diagTimer);
+    diagTimer = setTimeout(() => runDiagnostics(doc), 300);
+  }
+
   context.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument(doc => { if (doc.languageId === 'flare') runDiagnostics(doc); }),
     vscode.workspace.onDidOpenTextDocument(doc => { if (doc.languageId === 'flare') runDiagnostics(doc); }),
+    vscode.workspace.onDidChangeTextDocument(e => { if (e.document.languageId === 'flare') debouncedDiag(e.document); }),
     vscode.window.onDidChangeActiveTextEditor(ed => { if (ed?.document.languageId === 'flare') runDiagnostics(ed.document); }),
     vscode.workspace.onDidCloseTextDocument(doc => { diagnosticCollection.delete(doc.uri); documentSymbols.delete(doc.uri.toString()); })
   );
@@ -249,6 +257,20 @@ function runDiagnostics(document) {
         symbols.set(m[2], { type: m[3].trim(), source: 'emit', line: docLine, options: m[1]?.trim(), doc: jsDoc });
       if ((m = line.match(/^ref\s+(\w+)\s*:\s*(.+)$/)))
         symbols.set(m[1], { type: m[2].trim(), source: 'ref', line: docLine, doc: jsDoc });
+      if ((m = line.match(/^provide\s+(\w+)\s*:\s*([^=]+)\s*=\s*(.+)$/)))
+        symbols.set(m[1], { type: m[2].trim(), source: 'provide', line: docLine, init: m[3].trim(), doc: jsDoc });
+      if ((m = line.match(/^consume\s+(\w+)\s*:\s*(.+)$/)))
+        symbols.set(m[1], { type: m[2].trim(), source: 'consume', line: docLine, doc: jsDoc });
+      // watch missing deps check
+      if ((m = line.match(/^watch\s*\(([^)]+)\)\s*\{/))) {
+        const deps = m[1].split(',').map(d => d.trim());
+        for (const dep of deps) {
+          if (!symbols.has(dep)) {
+            diagnostics.push(mkDiag(docLine, 0, docLine, line.length,
+              `watch の依存 '${dep}' が state として宣言されていません`, 'warning'));
+          }
+        }
+      }
     }
   }
 
@@ -325,8 +347,9 @@ function runDiagnostics(document) {
           }
         }
 
-        // Undefined variables
-        const ids = expr.match(/\b[a-zA-Z_]\w*\b/g) || [];
+        // Undefined variables (strip string literals first to avoid false positives)
+        const stripped = expr.replace(/"(?:[^"\\]|\\.)*"/g, ' ').replace(/'(?:[^'\\]|\\.)*'/g, ' ').replace(/`(?:[^`\\]|\\.)*`/g, ' ');
+        const ids = stripped.match(/\b[a-zA-Z_]\w*\b/g) || [];
         for (const id of ids) {
           if (reserved.has(id)) continue;
           if (localSymbols.has(id)) continue;
@@ -350,6 +373,24 @@ function runDiagnostics(document) {
           diagnostics.push(mkDiag(docLine, col, docLine, col + handler.length,
             `イベントハンドラ '${fnName}' が <script> 内に定義されていません — fn ${fnName}() { ... } を追加してください`, 'warning'));
         }
+      }
+
+      // Check @html security warning
+      const htmlRe = /@html="([^"]*)"/g;
+      let hm;
+      while ((hm = htmlRe.exec(line)) !== null) {
+        const col = hm.index;
+        diagnostics.push(mkDiag(docLine, col, docLine, col + hm[0].length,
+          '@html はエスケープされません。XSS脆弱性のリスクがあります。信頼できるデータのみ使用してください', 'warning'));
+      }
+
+      // Check dynamic :href/:src security
+      const dynUrlRe = /:(href|src|action|formaction)="([^"]*)"/g;
+      let dum;
+      while ((dum = dynUrlRe.exec(line)) !== null) {
+        const col = dum.index;
+        diagnostics.push(mkDiag(docLine, col, docLine, col + dum[0].length,
+          `動的な :${dum[1]} は javascript: URL インジェクションに注意してください`, 'hint'));
       }
 
       // Check #for required attrs
@@ -416,10 +457,13 @@ function runDiagnostics(document) {
 // ── Helpers ──
 
 function mkDiag(sl, sc, el, ec, msg, level) {
+  const severity = level === 'error' ? vscode.DiagnosticSeverity.Error
+    : level === 'hint' ? vscode.DiagnosticSeverity.Hint
+    : vscode.DiagnosticSeverity.Warning;
   return new vscode.Diagnostic(
     new vscode.Range(sl, sc, el, ec),
     msg,
-    level === 'error' ? vscode.DiagnosticSeverity.Error : vscode.DiagnosticSeverity.Warning
+    severity
   );
 }
 
