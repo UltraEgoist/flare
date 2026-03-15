@@ -1,0 +1,72 @@
+{
+  "name": "flare-lang",
+  "displayName": "Flare",
+  "description": "Flare言語サポート - シンタックスハイライト、型チェック、エラー表示",
+  "version": "0.1.0",
+  "publisher": "aspect",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "flare",
+    "web components",
+    "custom elements",
+    "template"
+  ],
+  "icon": "icons/flare-icon.png",
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:flare"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "flare",
+        "aliases": [
+          "Flare",
+          "flare"
+        ],
+        "extensions": [
+          ".flare"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/flare-file-light.svg",
+          "dark": "./icons/flare-file-dark.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "flare",
+        "scopeName": "source.flare",
+        "path": "./syntaxes/flare.tmLanguage.json",
+        "embeddedLanguages": {
+          "source.css": "css",
+          "source.js": "javascript",
+          "source.ts": "typescript",
+          "text.html.basic": "html"
+        }
+      }
+    ],
+    "configuration": {
+      "title": "Flare",
+      "properties": {
+        "flare.enableDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "リアルタイム型チェックとエラー表示を有効にする"
+        },
+        "flare.compilerPath": {
+          "type": "string",
+          "default": "",
+          "description": "flare-cli の bin/flare.js へのパス（空の場合はグローバルの flare コマンドを使用）"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@aspect/flare",
+  "version": "0.1.0",
+  "description": "Flare - テンプレートファーストのWeb Componentコンパイラ",
+  "bin": {
+    "flare": "./bin/flare.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "template/"
+  ],
+  "keywords": ["web-components", "compiler", "template", "custom-elements"],
+  "license": "MIT"
+}
