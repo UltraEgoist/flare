@@ -27,17 +27,22 @@ flare/
 └── docs/                   ← ドキュメント
 ```
 
-### ローカルテスト
+### テスト
 
 ```bash
+# 全テスト実行（コンパイラ 79件 + CLI 23件 = 102件）
+npm test
+
+# 構文チェック
+npm run lint
+
+# サンプルコンポーネントの型チェック
+npm run check
+
 # テストプロジェクトを作成
 node flare-cli/bin/flare.js init test-project
 cd test-project
-
-# ビルド
 node ../flare-cli/bin/flare.js build
-
-# 開発サーバー
 node ../flare-cli/bin/flare.js dev
 ```
 
@@ -107,12 +112,13 @@ Phase 4: generate()       ← Custom Element クラス (JS) を出力
 ## 未実装の領域（貢献歓迎）
 
 - [ ] **Language Server Protocol**: `fn` 内のTypeScript型チェック
-- [ ] **テストフレームワーク**: コンパイラの自動テスト
+- [ ] **差分レンダリング**: 仮想DOM差分による効率的DOM更新（現在はフル再レンダリング）
 - [ ] **HMR**: WebSocket経由のホットリロード
 - [ ] **SSR**: サーバーサイドレンダリング
 - [ ] **sourcemap**: コンパイル前後の行マッピング
 - [ ] **Rust版コンパイラ**: `flare-compiler-rust/` のビルド・テスト
 - [ ] **他エディタの拡張**: JetBrains / Vim / Neovim
+- [x] ~~**テストフレームワーク**: コンパイラの自動テスト~~ → 102テスト実装済み
 
 ## ライセンス
 

@@ -1,3 +1,28 @@
+/**
+ * Flare VS Code Extension v0.2.0
+ *
+ * このVS Code拡張機能は、Flareコンポーネント言語に対する統合開発環境サポートを提供します。
+ *
+ * 主な機能:
+ * - **リアルタイム診断**: state, prop, computed, fn, emit, ref などの宣言を検証
+ * - **ホバードキュメント**: キーワードや宣言にカーソルを当てると詳細情報を表示
+ * - **自動補完**: スクリプトディレクティブ（state, fn など）とテンプレート構文をサポート
+ * - **定義へのジャンプ**: 識別子をクリックして宣言位置に移動
+ * - **ドキュメント アウトライン**: 右側パネルにコンポーネント構造を表示
+ *
+ * 内部データ構造:
+ * - {@link documentSymbols} - ドキュメントURIごとのシンボル表（変数、関数、プロパティなど）
+ * - {@link documentHashes} - インクリメンタル解析用のコンテンツハッシュ
+ * - {@link diagnosticCollection} - VS Code診断コレクション（エラー・警告の表示）
+ *
+ * シンボル表の構造: { name: string, type: string, source: string, line: number, doc?: string, ... }
+ * - name: 識別子名
+ * - type: 型注釈（"number", "string[]" など）
+ * - source: 宣言タイプ（"state", "prop", "fn", "emit" など）
+ * - line: 宣言のあるドキュメント行番号（1-indexed）
+ * - doc: JSDocコメント（スラッシュ-アスタリスク形式のコメント内容）
+ */
+
 // ============================================================
 // Flare VS Code Extension v0.2.0
 // ============================================================
@@ -6,38 +31,103 @@ const vscode = require('vscode');
 const path = require('path');
 const fs = require('fs');
 
+/** @type {vscode.DiagnosticCollection} VS Code診断コレクション（エラー・警告・情報を管理） */
 let diagnosticCollection;
-const documentSymbols = new Map(); // uri -> Map<name, symbol>
-const documentHashes = new Map(); // uri -> hash for P2-54 incremental parsing
 
+/**
+ * ドキュメントごとのシンボル表
+ * キー: ドキュメントURI、値: Map<識別子名, シンボルメタデータ>
+ *
+ * シンボルメタデータ: { type, source, line, doc, init?, expr?, params?, async?, options? }
+ * - type: 型注釈
+ * - source: "state" | "prop" | "computed" | "fn" | "emit" | "ref" | "provide" | "consume"
+ * - line: 宣言行番号（1-indexed）
+ * - doc: JSDocコメント（スラッシュ-アスタリスク形式）
+ * - init: 初期値（state, prop, provide用）
+ * - expr: 計算式（computed用）
+ * - params: 関数パラメータリスト（fn用）
+ * - async: 非同期フラグ（fn用）
+ * - options: emit修飾子（emit用）
+ * @type {Map<string, Map<string, Object>>}
+ */
+const documentSymbols = new Map();
+
+/**
+ * コンテンツハッシュキャッシュ（インクリメンタル解析用）
+ * P2-54: 同じ内容のドキュメントは再解析をスキップ
+ * キー: ドキュメントURI、値: djb2ハッシュ値
+ * @type {Map<string, string>}
+ */
+const documentHashes = new Map();
+
+/**
+ * 拡張機能のアクティベーション（初期化）
+ *
+ * 以下の処理を実行:
+ * 1. 診断コレクションの作成
+ * 2. 言語プロバイダーの登録（ホバー、補完、定義、シンボル）
+ * 3. テキストドキュメントイベントリスナーの設定
+ * 4. 現在開いているすべてのFlareドキュメントの診断実行
+ *
+ * @param {vscode.ExtensionContext} context - 拡張機能コンテキスト
+ * @returns {void}
+ */
 function activate(context) {
+  // 診断コレクションを作成し、拡張機能がクリーンアップ時に自動処理するよう登録
   diagnosticCollection = vscode.languages.createDiagnosticCollection('flare');
   context.subscriptions.push(diagnosticCollection);
 
-  // Debounced diagnostics for real-time feedback while typing
+  /**
+   * デバウンス処理：テキスト変更時の診断を300ms遅延実行
+   * 理由: ユーザーが高速に入力中に毎回診断すると重くなるため
+   * @type {number|null}
+   */
   let diagTimer = null;
   function debouncedDiag(doc) {
     if (diagTimer) clearTimeout(diagTimer);
     diagTimer = setTimeout(() => runDiagnostics(doc), 300);
   }
 
+  // ── イベントリスナー登録 ──
   context.subscriptions.push(
+    // ファイル保存時：即座に診断実行
     vscode.workspace.onDidSaveTextDocument(doc => { if (doc.languageId === 'flare') runDiagnostics(doc); }),
+    // ファイル開時：初期診断実行
     vscode.workspace.onDidOpenTextDocument(doc => { if (doc.languageId === 'flare') runDiagnostics(doc); }),
+    // テキスト変更時：デバウンス処理で診断実行
     vscode.workspace.onDidChangeTextDocument(e => { if (e.document.languageId === 'flare') debouncedDiag(e.document); }),
+    // アクティブエディタ変更時：診断実行
     vscode.window.onDidChangeActiveTextEditor(ed => { if (ed?.document.languageId === 'flare') runDiagnostics(ed.document); }),
+    // ドキュメント閉時：キャッシュクリア
     vscode.workspace.onDidCloseTextDocument(doc => { diagnosticCollection.delete(doc.uri); documentSymbols.delete(doc.uri.toString()); })
   );
 
+  // ── 言語プロバイダー登録 ──
+  // ホバードキュメント: カーソル位置の識別子情報を表示
   context.subscriptions.push(vscode.languages.registerHoverProvider('flare', { provideHover }));
+  // 自動補完: キーワード（state, fn等）とテンプレート構文をサジェスト
   context.subscriptions.push(vscode.languages.registerCompletionItemProvider('flare', { provideCompletionItems }));
+  // 定義へのジャンプ: 識別子をクリックして宣言位置に移動
   context.subscriptions.push(vscode.languages.registerDefinitionProvider('flare', { provideDefinition }));
+  // ドキュメント アウトライン: 右側パネルにコンポーネント構造を表示
   context.subscriptions.push(vscode.languages.registerDocumentSymbolProvider('flare', { provideDocumentSymbols }));
 
+  // 既に開いているFlareドキュメントに対して初期診断を実行
   vscode.workspace.textDocuments.forEach(doc => { if (doc.languageId === 'flare') runDiagnostics(doc); });
 }
 
-function deactivate() { diagnosticCollection?.dispose(); }
+/**
+ * 拡張機能のディアクティベーション（クリーンアップ）
+ *
+ * VS Codeが拡張機能をアンロードする際に呼び出されます。
+ * リソースをクリーンアップします。
+ *
+ * @returns {void}
+ */
+function deactivate() {
+  // 診断コレクションを破棄（メモリ解放、リソース確保）
+  diagnosticCollection?.dispose();
+}
 
 // ═══════════════════════════════════════════
 // HOVER DOCS
@@ -82,19 +172,37 @@ const HOVER = {
   'shadow': '**shadow** — Shadow DOMモード\n\n```\nshadow: open     // 外部からアクセス可能（デフォルト）\nshadow: closed   // 外部からアクセス不可\nshadow: none     // Shadow DOM不使用\n```\n\n`none` はTailwind等の外部CSSと併用する場合に便利です。',
 };
 
+/**
+ * ホバードキュメントプロバイダー
+ *
+ * カーソル位置の単語に関する情報をマークダウン形式で表示します。
+ * 以下の場合を処理:
+ * 1. キーワード（state, fn, import 等）→ スクリプト構文の説明
+ * 2. テンプレートディレクティブ（#if, #for, :bind 等）→ テンプレート構文の説明
+ * 3. ユーザー定義シンボル（state, fn, computed等の宣言）→ 型情報とJSDocコメント
+ * 4. イベントハンドラ（@click, @input 等）→ 修飾子情報を含む説明
+ *
+ * @param {vscode.TextDocument} document - テキストドキュメント
+ * @param {vscode.Position} position - ホバー位置
+ * @returns {vscode.Hover|null} ホバー情報、または見つからなければnull
+ */
 function provideHover(document, position) {
   const line = document.lineAt(position).text;
 
-  // Try word with @ or : prefix
+  // ── 単語範囲の決定 ──
+  // @eventリスナーや:bindディレクティブの修飾子付きキーワードに対応
+  // 例: @click|once, :bind-label
   let wordRange = document.getWordRangeAtPosition(position, /[@:#][\w-]+(?:\|[\w]+)*/);
   if (!wordRange) wordRange = document.getWordRangeAtPosition(position, /[\w]+/);
   if (!wordRange) return null;
   const word = document.getText(wordRange);
 
-  // Direct match
+  // ── 直接マッチ（キーワード辞書） ──
+  // HOVERオブジェクトにある標準キーワードの説明を返す
   if (HOVER[word]) return mkHover(HOVER[word], wordRange);
 
-  // @event with modifiers
+  // ── @event ハンドラの動的説明 ──
+  // @click|prevent のような修飾子付きイベントに対応
   if (word.startsWith('@')) {
     const parts = word.slice(1).split('|');
     const evName = parts[0];
@@ -118,7 +226,7 @@ function provideHover(document, position) {
     return mkHover(md, wordRange);
   }
 
-  // :binding
+  // ── :directive （:bind, :class, :style 等の動的バインディング） ──
   if (word.startsWith(':') && word.length > 1) {
     const attr = word.slice(1);
     const bindDocs = {
@@ -138,12 +246,14 @@ function provideHover(document, position) {
     return mkHover(`**:${attr}** — ${desc}\n\n\`\`\`flare\n<div :${attr}="expression">\n\`\`\``, wordRange);
   }
 
-  // fn keyword special handling
+  // ── キーワード特別処理 ──
+  // fn, async, type は複合キーワードのためここで個別処理
   if (word === 'fn') return mkHover(HOVER['fn'], wordRange);
   if (word === 'async') return mkHover(HOVER['async'], wordRange);
   if (word === 'type') return mkHover(HOVER['type'], wordRange);
 
-  // ── Symbol lookup: show user-defined JSDoc + type info ──
+  // ── ユーザー定義シンボルの検索 ──
+  // documentSymbols から識別子を検索し、型情報とJSDocを表示
   const uri = document.uri.toString();
   const syms = documentSymbols.get(uri);
   if (syms && syms.has(word)) {
@@ -152,26 +262,33 @@ function provideHover(document, position) {
     const sourceLabel = { state: 'state', prop: 'prop', computed: 'computed', fn: 'fn', emit: 'emit', ref: 'ref', provide: 'provide', consume: 'consume' };
     const kind = sourceLabel[sym.source] || sym.source;
 
-    // Signature line
+    // ── シグネチャ行の構築 ──
+    // 宣言タイプに応じた構文ハイライトを表示
     if (sym.source === 'fn') {
+      // 関数: fn [async] name(params)
       const asyncMark = sym.async ? 'async ' : '';
       md += `\`\`\`flare\nfn ${asyncMark}${word}(${sym.params || ''})\n\`\`\`\n\n`;
     } else if (sym.source === 'emit') {
+      // イベント: emit [(修飾子)] name: type
       const opts = sym.options ? `(${sym.options}) ` : '';
       md += `\`\`\`flare\nemit${opts ? `(${sym.options})` : ''} ${word}: ${sym.type}\n\`\`\`\n\n`;
     } else if (sym.source === 'computed') {
+      // 派生値: computed name: type = expr
       md += `\`\`\`flare\ncomputed ${word}: ${sym.type} = ${sym.expr || '...'}\n\`\`\`\n\n`;
     } else {
+      // その他（state, prop, ref等）: kind name: type [= init]
       const initStr = sym.init ? ` = ${sym.init}` : '';
       md += `\`\`\`flare\n${kind} ${word}: ${sym.type}${initStr}\n\`\`\`\n\n`;
     }
 
-    // JSDoc description
+    // ── JSDocコメント表示 ──
+    // 宣言の直前にある /** ... */ コメントを表示
     if (sym.doc) {
       md += `${sym.doc}\n\n`;
     }
 
-    // Kind badge
+    // ── メタ情報バッジ ──
+    // 宣言の種類と行番号を表示
     md += `*${kind}* — line ${sym.line}`;
 
     return mkHover(md, wordRange);
@@ -180,16 +297,42 @@ function provideHover(document, position) {
   return null;
 }
 
+/**
+ * ホバーオブジェクト生成ヘルパー
+ *
+ * マークダウン文字列をVS Code形式のHoverオブジェクトに変換します。
+ * isTrusted=trueにより、マークダウン内のHTMLタグが評価されます（セキュリティ確認済み）。
+ *
+ * @param {string} md - マークダウン形式のドキュメント文字列
+ * @param {vscode.Range} range - ホバー対象の単語の範囲
+ * @returns {vscode.Hover} VS Codeホバーオブジェクト
+ */
 function mkHover(md, range) {
   const h = new vscode.MarkdownString(md);
+  // isTrusted=true でマークダウン内のHTML（リンク等）を有効化
   h.isTrusted = true;
   return new vscode.Hover(h, range);
 }
 
-// ═══════════════════════════════════════════
-// P2-44: COMPLETION PROVIDER
-// ═══════════════════════════════════════════
+/**
+ * 自動補完プロバイダー（P2-44）
+ *
+ * Flareキーワードとテンプレート構文の補完候補を提供します。
+ * ユーザーが入力開始時に呼び出され、スニペット付きで候補を表示します。
+ */
 
+// ═══════════════════════════════════════════
+// 自動補完候補辞書
+// ═══════════════════════════════════════════
+/**
+ * 補完候補の辞書
+ *
+ * 各キーワードの補完設定: { kind, detail, insertText }
+ * - kind: VS Code CompletionItemKind（キーワード、メソッド等）
+ * - detail: 右側パネルに表示される説明
+ * - insertText: スニペット形式のテンプレート（${1:name} はタブストップ）
+ * @type {Object<string, {kind: vscode.CompletionItemKind, detail: string, insertText?: string}>}
+ */
 const COMPLETIONS = {
   // Script keywords
   'state': { kind: vscode.CompletionItemKind.Keyword, detail: 'リアクティブ変数', insertText: 'state ${1:name}: ${2:type} = ${3:value}' },
@@ -225,19 +368,32 @@ const COMPLETIONS = {
   'ref': { kind: vscode.CompletionItemKind.Method, detail: 'DOM参照', insertText: 'ref="${1:refName}"' },
 };
 
+/**
+ * 自動補完提供プロバイダー
+ *
+ * カーソル位置でのキーワードマッチに基づいて補完候補を返します。
+ * 現在の実装はすべての候補を常に返し、VS Code側でフィルタリングさせます。
+ *
+ * @param {vscode.TextDocument} document - テキストドキュメント
+ * @param {vscode.Position} position - 補完位置
+ * @returns {vscode.CompletionItem[]} 補完候補の配列
+ */
 function provideCompletionItems(document, position) {
   const line = document.lineAt(position).text;
   const beforeCursor = line.substring(0, position.character);
   const items = [];
 
-  // Check if we're at start of a word (for keywords)
+  // ── 単語の開始地点であることを確認 ──
+  // /[\w-]*$/ は行末までの単語を抽出（キーワード候補を絞り込む）
   const wordMatch = beforeCursor.match(/[\w-]*$/);
   if (wordMatch) {
+    // ── 補完候補の構築 ──
+    // COMPLETIONS辞書のすべてのキーワードについて補完アイテムを作成
     for (const [key, config] of Object.entries(COMPLETIONS)) {
       const item = new vscode.CompletionItem(key, config.kind);
-      item.detail = config.detail;
-      if (config.insertText) item.insertText = new vscode.SnippetString(config.insertText);
-      item.documentation = new vscode.MarkdownString(`**${key}** — ${config.detail}`);
+      item.detail = config.detail; // 右側パネルに表示
+      if (config.insertText) item.insertText = new vscode.SnippetString(config.insertText); // スニペット
+      item.documentation = new vscode.MarkdownString(`**${key}** — ${config.detail}`); // ホバー説明
       items.push(item);
     }
   }
@@ -245,12 +401,25 @@ function provideCompletionItems(document, position) {
   return items;
 }
 
-// ═══════════════════════════════════════════
-// P2-45: DEFINITION PROVIDER
-// ═══════════════════════════════════════════
+/**
+ * 定義へのジャンププロバイダー（P2-45）
+ *
+ * 識別子をCtrl+クリック（またはF12）で宣言位置にジャンプできます。
+ * シンボル表から該当識別子を検索し、その行番号を返します。
+ */
 
+/**
+ * 定義位置の取得プロバイダー
+ *
+ * カーソル位置の識別子が<script>内で宣言されている場合、その行番号を返します。
+ *
+ * @param {vscode.TextDocument} document - テキストドキュメント
+ * @param {vscode.Position} position - カーソル位置
+ * @returns {vscode.Location|null} 定義位置、見つからなければnull
+ */
 function provideDefinition(document, position) {
   const line = document.lineAt(position).text;
+  // ── 単語範囲の取得 ──
   const wordRange = document.getWordRangeAtPosition(position);
   if (!wordRange) return null;
 
@@ -258,6 +427,8 @@ function provideDefinition(document, position) {
   const uri = document.uri.toString();
   const syms = documentSymbols.get(uri);
 
+  // ── シンボル表から検索 ──
+  // 見つかった場合は宣言行の位置を返す
   if (syms && syms.has(word)) {
     const sym = syms.get(word);
     return new vscode.Location(document.uri, new vscode.Position(sym.line, 0));
@@ -266,36 +437,51 @@ function provideDefinition(document, position) {
   return null;
 }
 
-// ═══════════════════════════════════════════
-// P2-50: DOCUMENT SYMBOL PROVIDER
-// ═══════════════════════════════════════════
+/**
+ * ドキュメント シンボルプロバイダー（P2-50）
+ *
+ * 右側パネルの「アウトライン」に表示されるコンポーネント構造を提供します。
+ * state, prop, fn, emit, ref などのすべての宣言をツリー形式で表示します。
+ */
 
+/**
+ * ドキュメントシンボルの取得プロバイダー
+ *
+ * ドキュメント内の すべてのシンボル（宣言）をVS Code形式に変換して返します。
+ * VS Codeは自動的に右側パネルにツリー表示します。
+ *
+ * @param {vscode.TextDocument} document - テキストドキュメント
+ * @returns {vscode.DocumentSymbol[]} シンボルの配列
+ */
 function provideDocumentSymbols(document) {
   const uri = document.uri.toString();
   const syms = documentSymbols.get(uri);
   if (!syms) return [];
 
   const symbols = [];
+  // ── シンボル種別からVS Code SymbolKindへの変換 ──
+  // 右側パネルに表示されるアイコンと分類を決定
   const kindMap = {
-    state: vscode.SymbolKind.Variable,
-    prop: vscode.SymbolKind.Property,
-    computed: vscode.SymbolKind.Property,
-    fn: vscode.SymbolKind.Function,
-    emit: vscode.SymbolKind.Event,
-    ref: vscode.SymbolKind.Field,
-    provide: vscode.SymbolKind.Property,
-    consume: vscode.SymbolKind.Property,
-    watch: vscode.SymbolKind.Function,
+    state: vscode.SymbolKind.Variable,      // 変数アイコン
+    prop: vscode.SymbolKind.Property,       // プロパティアイコン
+    computed: vscode.SymbolKind.Property,   // プロパティアイコン
+    fn: vscode.SymbolKind.Function,         // 関数アイコン
+    emit: vscode.SymbolKind.Event,          // イベントアイコン
+    ref: vscode.SymbolKind.Field,           // フィールドアイコン
+    provide: vscode.SymbolKind.Property,    // プロパティアイコン
+    consume: vscode.SymbolKind.Property,    // プロパティアイコン
+    watch: vscode.SymbolKind.Function,      // 関数アイコン
   };
 
+  // ── シンボルテーブルをVS Code形式に変換 ──
   for (const [name, sym] of syms) {
     const kind = kindMap[sym.source] || vscode.SymbolKind.Variable;
     const docSym = new vscode.DocumentSymbol(
-      name,
-      sym.source,
-      kind,
-      new vscode.Range(sym.line, 0, sym.line, 1),
-      new vscode.Range(sym.line, 0, sym.line, 1)
+      name,                                          // シンボル名
+      sym.source,                                    // 説明（state, fn等）
+      kind,                                          // アイコン種別
+      new vscode.Range(sym.line, 0, sym.line, 1),  // シンボルの範囲
+      new vscode.Range(sym.line, 0, sym.line, 1)   // 選択時のジャンプ範囲
     );
     symbols.push(docSym);
   }
@@ -303,52 +489,81 @@ function provideDocumentSymbols(document) {
   return symbols;
 }
 
-// ═══════════════════════════════════════════
-// DIAGNOSTICS
-// ═══════════════════════════════════════════
-
+/**
+ * 診断エンジン（メイン検証ロジック）
+ *
+ * Flareドキュメントの構文と意味論を検証し、エラー・警告・ヒントを生成します。
+ * 実行パイプライン:
+ * 1. インクリメンタル解析（P2-54）: ハッシュ比較で不変ドキュメントはスキップ
+ * 2. ブロック解析: <meta>, <script>, <template>, <style> を抽出
+ * 3. シンボルテーブル構築: state, prop, fn, emit等の宣言を収集
+ * 4. テンプレート検証: 変数参照、イベントハンドラ、ブロック構文をチェック
+ * 5. セキュリティ警告: @html, 動的URL等をフラグ
+ *
+ * @param {vscode.TextDocument} document - テキストドキュメント
+ * @returns {void}
+ */
 function runDiagnostics(document) {
+  // ── 診断の有効性確認 ──
   const config = vscode.workspace.getConfiguration('flare');
   if (!config.get('enableDiagnostics', true)) return;
 
   const source = document.getText();
   const diagnostics = [];
 
-  // P2-54: Skip re-parsing if document hasn't changed
+  // ── インクリメンタル解析（P2-54） ──
+  // コンテンツハッシュが同じ場合は再解析をスキップ（パフォーマンス最適化）
   const uri = document.uri.toString();
   const currentHash = hashContent(source);
   if (documentHashes.get(uri) === currentHash) return;
   documentHashes.set(uri, currentHash);
 
-  // Parse blocks
+  // ── ブロック解析 ──
+  // <meta>, <script>, <template>, <style> タグを抽出
   const blocks = [];
   const blockRe = /<(meta|script|template|style)(\s[^>]*)?>([\s\S]*?)<\/\1>/g;
   let bm;
   while ((bm = blockRe.exec(source)) !== null) {
-    blocks.push({ type: bm[1], content: bm[3], startLine: source.substring(0, bm.index).split('\n').length - 1 });
+    blocks.push({
+      type: bm[1],                                           // ブロック種別
+      content: bm[3],                                         // タグ内容
+      startLine: source.substring(0, bm.index).split('\n').length - 1 // ドキュメント内の行番号
+    });
   }
 
+  // ── テンプレート必須チェック ──
+  // Flareコンポーネントは <template> ブロックが必須
   if (!blocks.some(b => b.type === 'template')) {
     diagnostics.push(mkDiag(0, 0, 0, 1, '<template> ブロックが見つかりません', 'error'));
     diagnosticCollection.set(document.uri, diagnostics);
     return;
   }
 
-  // ── Build symbol table ──
+  // ── シンボルテーブル構築 ──
+  // <script> ブロック内の宣言（state, fn, emit等）を収集して documentSymbols に登録
   const symbols = new Map();
   const scriptBlock = blocks.find(b => b.type === 'script');
   if (scriptBlock) {
     const lines = scriptBlock.content.split('\n');
 
-    // Collect JSDoc comments: /** ... */ above a declaration
+    /**
+     * JSDocコメント抽出ヘルパー
+     *
+     * 指定行の直前にある JSDoc コメント（/** ... */）を抽出します。
+     * 単一行（/** text */）と複数行（/** ... * ... */）の両形式に対応。
+     *
+     * @param {number} lineIndex - コメント対象の行インデックス（lines配列内）
+     * @returns {string} 抽出されたJSDocテキスト（複数行の場合は\nで結合）
+     */
     function getJsDoc(lineIndex) {
       let doc = '';
       let j = lineIndex - 1;
-      // Single-line: /** comment */
+      // ── 単一行JSDoc: /** comment */ ──
       if (j >= 0 && lines[j].trim().match(/^\/\*\*(.+)\*\/$/)) {
         return lines[j].trim().replace(/^\/\*\*\s*/, '').replace(/\s*\*\/$/, '').trim();
       }
-      // Multi-line: /** ... \n * ... \n */
+      // ── 複数行JSDoc: /** ... \n * ... \n */ ──
+      // 後ろから遡ってJSDocのすべての行を収集
       const collected = [];
       while (j >= 0 && !lines[j].trim().startsWith('/**')) {
         const l = lines[j].trim();
@@ -364,26 +579,40 @@ function runDiagnostics(document) {
       return '';
     }
 
+    // ── スクリプトブロック内の宣言をスキャン ──
+    // 各行をシンボルテーブルに登録
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
-      const docLine = scriptBlock.startLine + i + 1;
-      const jsDoc = getJsDoc(i);
+      const docLine = scriptBlock.startLine + i + 1; // ドキュメント全体での行番号
+      const jsDoc = getJsDoc(i); // 直前のJSDocコメント抽出
       let m;
 
+      // ── state 宣言 ──
+      // state name: type = initialValue
       if ((m = line.match(/^state\s+(\w+)\s*:\s*([^=]+)\s*=\s*(.+)$/))) {
         symbols.set(m[1], { type: m[2].trim(), source: 'state', line: docLine, init: m[3].trim(), doc: jsDoc });
       } else if ((m = line.match(/^state\s+(\w+)/)) && !line.includes('=')) {
+        // state は初期値が必須
         diagnostics.push(mkDiag(docLine, 0, docLine, line.length, `state '${m[1]}' には初期値（= value）が必要です`, 'error'));
       }
+
+      // ── prop 宣言 ──
+      // prop name: type [= defaultValue]
       if ((m = line.match(/^prop\s+(\w+)\s*:\s*([^=]+?)(?:\s*=\s*(.+))?$/)))
         symbols.set(m[1], { type: m[2].trim(), source: 'prop', line: docLine, init: m[3]?.trim(), doc: jsDoc });
+
+      // ── computed 宣言 ──
+      // computed name: type = expression
       if ((m = line.match(/^computed\s+(\w+)\s*:\s*([^=]+)\s*=\s*(.+)$/)))
         symbols.set(m[1], { type: m[2].trim(), source: 'computed', line: docLine, expr: m[3].trim(), doc: jsDoc });
-      // P2-53: Handle multi-line fn declarations
+
+      // ── fn 宣言 ──
+      // P2-53: 複数行関数定義に対応
+      // fn [async] name( ... )
       if ((m = line.match(/^fn\s+(async\s+)?(\w+)\s*\(/))) {
+        // 複数行に渡っている場合、次行を読み込んでパラメータを完成させる
         let params = m[3] || '';
         let j = i;
-        // Collect parameters across multiple lines if closing paren not found
         while (!params.includes(')') && j < lines.length - 1) {
           j++;
           params += ' ' + lines[j];
@@ -394,17 +623,32 @@ function runDiagnostics(document) {
           symbols.set(m[2], { type: 'function', source: 'fn', line: docLine, async: !!m[1], params: paramsOnly, doc: jsDoc });
         }
       } else if ((m = line.match(/^fn\s+(async\s+)?(\w+)\s*\(([^)]*)\)/))) {
+        // 単一行関数定義（括弧が同じ行にある）
         symbols.set(m[2], { type: 'function', source: 'fn', line: docLine, async: !!m[1], params: m[3].trim(), doc: jsDoc });
       }
+
+      // ── emit 宣言 ──
+      // emit [(修飾子)] name: type
       if ((m = line.match(/^emit(?:\(([^)]*)\))?\s+(\w+)\s*:\s*(.+)$/)))
         symbols.set(m[2], { type: m[3].trim(), source: 'emit', line: docLine, options: m[1]?.trim(), doc: jsDoc });
+
+      // ── ref 宣言 ──
+      // ref name: type
       if ((m = line.match(/^ref\s+(\w+)\s*:\s*(.+)$/)))
         symbols.set(m[1], { type: m[2].trim(), source: 'ref', line: docLine, doc: jsDoc });
+
+      // ── provide 宣言 ──
+      // provide name: type = value
       if ((m = line.match(/^provide\s+(\w+)\s*:\s*([^=]+)\s*=\s*(.+)$/)))
         symbols.set(m[1], { type: m[2].trim(), source: 'provide', line: docLine, init: m[3].trim(), doc: jsDoc });
+
+      // ── consume 宣言 ──
+      // consume name: type
       if ((m = line.match(/^consume\s+(\w+)\s*:\s*(.+)$/)))
         symbols.set(m[1], { type: m[2].trim(), source: 'consume', line: docLine, doc: jsDoc });
-      // watch missing deps check
+
+      // ── watch 依存チェック ──
+      // watch(...) { ... } の括弧内で参照される値が宣言されているか確認
       if ((m = line.match(/^watch\s*\(([^)]+)\)\s*\{/))) {
         const deps = m[1].split(',').map(d => d.trim());
         for (const dep of deps) {
@@ -417,30 +661,35 @@ function runDiagnostics(document) {
     }
   }
 
-  // ── Template checks ──
+  // ── テンプレートブロックの検証 ──
+  // 変数参照、イベントハンドラ、ブロック構文をチェック
   const templateBlock = blocks.find(b => b.type === 'template');
   if (templateBlock) {
     const tplContent = templateBlock.content;
     const tplLines = tplContent.split('\n');
 
-    // Collect #for loop variables with line ranges
-    const loopScopes = []; // { each: string, index?: string, fromLine: number, toLine: number }
+    // ── ループ変数スコープの収集 ──
+    // #for ループの範囲内でのみ、ループ変数（each, index）が有効
+    // { each: string, index?: string, fromLine: number, toLine: number }
+    const loopScopes = [];
     const forOpenRe = /<#for\s+each="([^"]+)"/g;
     let fm;
     while ((fm = forOpenRe.exec(tplContent)) !== null) {
       const eachParts = fm[1].split(',').map(s => s.trim());
       const lineNum = tplContent.substring(0, fm.index).split('\n').length - 1;
-      // Find matching </#for>
+      // マッチする </#for> を検索
       const closeIdx = findClose(tplContent, fm.index + fm[0].length, '#for');
       const closeLine = tplContent.substring(0, closeIdx).split('\n').length - 1;
       loopScopes.push({
-        each: eachParts[0],
-        index: eachParts[1] || null,
-        fromLine: lineNum,
-        toLine: closeLine,
+        each: eachParts[0],      // ループ変数名
+        index: eachParts[1] || null, // インデックス変数名（optional）
+        fromLine: lineNum,        // ループ開始行
+        toLine: closeLine,        // ループ終了行
       });
     }
 
+    // ── 予約語セット ──
+    // 未定義チェックの対象外とする言語キーワード、ビルトイン、一般的な略字
     const reserved = new Set([
       'true','false','null','undefined','void','typeof','instanceof',
       'new','return','if','else','for','while','const','let','var',
@@ -455,28 +704,32 @@ function runDiagnostics(document) {
       'event','e','r','s','i','t','n','ok','data','error',
     ]);
 
+    // ── テンプレート行ごとの検証 ──
     for (let i = 0; i < tplLines.length; i++) {
       const line = tplLines[i];
       const docLine = templateBlock.startLine + i + 1;
 
-      // Build local scope for this line (loop variables in scope)
+      // ── ローカルスコープの構築 ──
+      // スクリプトシンボル + このライン内で有効なループ変数
       const localSymbols = new Map(symbols);
       for (const scope of loopScopes) {
         if (i >= scope.fromLine && i <= scope.toLine) {
           localSymbols.set(scope.each, { type: 'any', source: 'loop' });
           if (scope.index) localSymbols.set(scope.index, { type: 'number', source: 'loop' });
-          // Also add 'index' as common alias
+          // 一般的なエイリアス 'index' も追加
           localSymbols.set('index', { type: 'number', source: 'loop' });
         }
       }
 
-      // Check {{ interpolation }}
+      // ── {{ 式 }} の検証 ──
+      // テンプレート式内の変数参照とメソッド呼び出しをチェック
       const interpRe = /\{\{\s*(.+?)\s*\}\}/g;
       let im;
       while ((im = interpRe.exec(line)) !== null) {
         const expr = im[1];
 
-        // Method on wrong type
+        // ── 型違反メソッド呼び出しの検出 ──
+        // 例: numberType.toUpperCase() → エラー
         const methMatch = expr.match(/^(\w+)\.(\w+)\(/);
         if (methMatch) {
           const sym = localSymbols.get(methMatch[1]);
@@ -490,12 +743,14 @@ function runDiagnostics(document) {
           }
         }
 
-        // Undefined variables (strip string literals first to avoid false positives)
+        // ── 未定義変数の検出 ──
+        // 文字列リテラル内の識別子は除外（false positive 防止）
         const stripped = expr.replace(/"(?:[^"\\]|\\.)*"/g, ' ').replace(/'(?:[^'\\]|\\.)*'/g, ' ').replace(/`(?:[^`\\]|\\.)*`/g, ' ');
         const ids = stripped.match(/\b[a-zA-Z_]\w*\b/g) || [];
         for (const id of ids) {
-          if (reserved.has(id)) continue;
-          if (localSymbols.has(id)) continue;
+          if (reserved.has(id)) continue;          // 予約語は無視
+          if (localSymbols.has(id)) continue;      // 定義済みなら OK
+          // Levenshtein距離で近い識別子を提案（タイポの可能性）
           let suggestion = null;
           for (const [key] of localSymbols) { if (lev(id, key) <= 2) { suggestion = key; break; } }
           const col = line.indexOf(id, im.index);
@@ -504,21 +759,23 @@ function runDiagnostics(document) {
         }
       }
 
-      // Check @event handlers reference existing fn
+      // ── @event ハンドラの検証 ──
+      // イベントハンドラが fn として定義されているか確認
       const eventRe = /@(\w+(?:\|\w+)*)="([^"]*)"/g;
       let em;
       while ((em = eventRe.exec(line)) !== null) {
         const handler = em[2].trim();
-        // Extract function name (ignore inline expressions like "count = 0" or "fn(args)")
+        // 関数名を抽出（"count = 0" や "fn(args)" のような式は無視）
         const fnName = handler.match(/^(\w+)$/)?.[1] || handler.match(/^(\w+)\s*\(/)?.[1];
         if (fnName && !symbols.has(fnName) && !handler.includes('=')) {
-          const col = em.index + em[1].length + 2; // after @event="
+          const col = em.index + em[1].length + 2; // @event=" の後
           diagnostics.push(mkDiag(docLine, col, docLine, col + handler.length,
             `イベントハンドラ '${fnName}' が <script> 内に定義されていません — fn ${fnName}() { ... } を追加してください`, 'warning'));
         }
       }
 
-      // Check @html security warning
+      // ── @html セキュリティ警告 ──
+      // @html はHTMLをエスケープしないため、XSS対策が必須
       const htmlRe = /@html="([^"]*)"/g;
       let hm;
       while ((hm = htmlRe.exec(line)) !== null) {
@@ -527,7 +784,8 @@ function runDiagnostics(document) {
           '@html はエスケープされません。XSS脆弱性のリスクがあります。信頼できるデータのみ使用してください', 'warning'));
       }
 
-      // Check dynamic :href/:src security
+      // ── 動的URL（:href, :src等）のセキュリティ警告 ──
+      // JavaScript: URLインジェクション対策の必要性を警告
       const dynUrlRe = /:(href|src|action|formaction)="([^"]*)"/g;
       let dum;
       while ((dum = dynUrlRe.exec(line)) !== null) {
@@ -536,7 +794,8 @@ function runDiagnostics(document) {
           `動的な :${dum[1]} は javascript: URL インジェクションに注意してください`, 'hint'));
       }
 
-      // Check #for required attrs
+      // ── #for の必須属性チェック ──
+      // each, of, key は必須
       if (line.match(/<#for\b/)) {
         if (!line.includes('each='))
           diagnostics.push(mkDiag(docLine, 0, docLine, line.length, '#for: 必須属性 each が不足 — each="変数名"', 'error'));
@@ -546,29 +805,33 @@ function runDiagnostics(document) {
           diagnostics.push(mkDiag(docLine, 0, docLine, line.length, '#for: 必須属性 key が不足 — key="一意キー"', 'error'));
       }
 
-      // Check #if required attrs
+      // ── #if の必須属性チェック ──
+      // condition は必須
       if (line.match(/<#if\b/) && !line.includes('condition='))
         diagnostics.push(mkDiag(docLine, 0, docLine, line.length, '#if: 必須属性 condition が不足 — condition="条件式"', 'error'));
     }
 
-    // Unclosed blocks
+    // ── ブロックの未閉じチェック ──
+    // #if ブロックの開閉タグ数を比較
     const openIf = (tplContent.match(/<#if/g) || []).length;
     const closeIf = (tplContent.match(/<\/#if>/g) || []).length;
     if (openIf > closeIf)
       diagnostics.push(mkDiag(templateBlock.startLine + 1, 0, templateBlock.startLine + 1, 1,
         `未閉じの #if ブロック（開: ${openIf}, 閉: ${closeIf}）`, 'error'));
+    // #for ブロックの開閉タグ数を比較
     const openFor = (tplContent.match(/<#for/g) || []).length;
     const closeFor = (tplContent.match(/<\/#for>/g) || []).length;
     if (openFor > closeFor)
       diagnostics.push(mkDiag(templateBlock.startLine + 1, 0, templateBlock.startLine + 1, 1,
         `未閉じの #for ブロック（開: ${openFor}, 閉: ${closeFor}）`, 'error'));
 
-    // Unused state
+    // ── 未使用 state の検出 ──
+    // テンプレートと他の fn/watch内で使用されていない state を警告
     for (const [name, sym] of symbols) {
       if (sym.source !== 'state') continue;
       const re = new RegExp(`\\b${name}\\b`);
-      if (re.test(tplContent)) continue;
-      // Check script usage
+      if (re.test(tplContent)) continue; // テンプレートで使用されている
+      // スクリプト内の使用確認
       let usedInScript = false;
       if (scriptBlock) {
         const sLines = scriptBlock.content.split('\n');
@@ -580,7 +843,8 @@ function runDiagnostics(document) {
     }
   }
 
-  // ── Meta validation ──
+  // ── メタブロックの検証 ──
+  // カスタム要素名がハイフンを含むか確認
   const metaBlock = blocks.find(b => b.type === 'meta');
   if (metaBlock) {
     for (const [i, line] of metaBlock.content.split('\n').entries()) {
@@ -591,57 +855,165 @@ function runDiagnostics(document) {
     }
   }
 
-  // Cache symbols for hover provider
+  // ── シンボルテーブルをキャッシュ ──
+  // ホバー・定義ジャンプ・シンボルプロバイダーで使用
   documentSymbols.set(document.uri.toString(), symbols);
 
+  // ── 診断を VS Code に送信 ──
   diagnosticCollection.set(document.uri, diagnostics);
 }
 
-// ── Helpers ──
+/**
+ * ユーティリティ関数
+ */
 
-// P2-54: Simple hash for incremental parsing check
+// ═══════════════════════════════════════════
+// ハッシュ・キャッシング
+// ═══════════════════════════════════════════
+
+/**
+ * コンテンツハッシュ関数（djb2アルゴリズム）
+ *
+ * P2-54: インクリメンタル解析用のコンテンツハッシュを計算します。
+ * 同じハッシュ値なら診断をスキップしてパフォーマンスを向上させます。
+ *
+ * djb2ハッシュは軽量で高速で、変更検出に適しています。
+ * 完全な衝突回避ではなく、"変更されていない可能性が高い" という判定です。
+ *
+ * @param {string} content - ドキュメント全体のテキスト
+ * @returns {string} 36進数のハッシュ値
+ */
 function hashContent(content) {
+  // djb2ハッシュアルゴリズム
   let h = 0;
   for (let i = 0; i < content.length; i++) {
     const char = content.charCodeAt(i);
-    h = ((h << 5) - h) + char;
-    h = h & h; // Convert to 32bit integer
+    h = ((h << 5) - h) + char;  // h = h * 33 + char
+    h = h & h; // 32ビット整数に変換
   }
   return h.toString(36);
 }
 
+// ═══════════════════════════════════════════
+// 診断オブジェクト生成
+// ═══════════════════════════════════════════
+
+/**
+ * 診断オブジェクト生成ヘルパー
+ *
+ * 指定された範囲とメッセージ、レベルから VS Code診断オブジェクトを生成します。
+ *
+ * @param {number} sl - スタート行（0-indexed）
+ * @param {number} sc - スタート列（0-indexed）
+ * @param {number} el - エンド行（0-indexed）
+ * @param {number} ec - エンド列（0-indexed）
+ * @param {string} msg - エラー・警告メッセージ
+ * @param {string} level - 重要度 ("error", "warning", "hint")
+ * @returns {vscode.Diagnostic} VS Code診断オブジェクト
+ */
 function mkDiag(sl, sc, el, ec, msg, level) {
+  // ── 重要度の決定 ──
   const severity = level === 'error' ? vscode.DiagnosticSeverity.Error
     : level === 'hint' ? vscode.DiagnosticSeverity.Hint
     : vscode.DiagnosticSeverity.Warning;
   return new vscode.Diagnostic(
-    new vscode.Range(sl, sc, el, ec),
-    msg,
-    severity
+    new vscode.Range(sl, sc, el, ec),  // ドキュメント内の範囲
+    msg,                                // ユーザーに表示するメッセージ
+    severity                            // 表示スタイル（赤/黄/青）
   );
 }
 
+// ═══════════════════════════════════════════
+// ブロック構造解析
+// ═══════════════════════════════════════════
+
+/**
+ * マッチング閉じタグの位置を検索
+ *
+ * 指定タイプのブロック（#if, #for等）の開き位置から、
+ * マッチング閉じタグ（</#if>, </#for>等）の位置を返します。
+ *
+ * ネストされたブロックにも対応（深さトラッキング）。
+ *
+ * @param {string} content - テンプレート内容
+ * @param {number} startPos - 開きタグの直後の位置
+ * @param {string} blockType - ブロックタイプ（"if", "for"等）
+ * @returns {number} 閉じタグ位置、見つからなければ content.length
+ *
+ * @example
+ * const content = '<#if ...>text</#if>';
+ * const closeIdx = findClose(content, 10, 'if');
+ * // closeIdx = content.indexOf('</#if>')
+ */
 function findClose(content, startPos, blockType) {
+  // ── ネストされたブロックの深さトラッキング ──
+  // 深さ1から開始し、開きタグで+1、閉じタグで-1
   const open = `<${blockType}`, close = `</${blockType}>`;
   let depth = 1, pos = startPos;
   while (depth > 0 && pos < content.length) {
     const no = content.indexOf(open, pos), nc = content.indexOf(close, pos);
-    if (nc === -1) return content.length;
-    if (no !== -1 && no < nc) { depth++; pos = no + open.length; }
-    else { depth--; if (depth === 0) return nc; pos = nc + close.length; }
+    if (nc === -1) return content.length; // 閉じタグなし → EOFを返す
+    if (no !== -1 && no < nc) {
+      // 次の開きタグが先に見つかった → ネストの深さ+1
+      depth++;
+      pos = no + open.length;
+    } else {
+      // 次の閉じタグが先に見つかった → 深さ-1
+      depth--;
+      if (depth === 0) return nc; // マッチング閉じタグ
+      pos = nc + close.length;
+    }
   }
   return content.length;
 }
 
+// ═══════════════════════════════════════════
+// 文字列類似度・タイポ検出
+// ═══════════════════════════════════════════
+
+/**
+ * Levenshtein距離（編集距離）の計算
+ *
+ * 2つの文字列間の最小編集操作数を計算します。
+ * タイポの可能性を判定するために使用（距離 <= 2）。
+ *
+ * 動的計画法で効率的に計算（O(m*n)時間計算量）。
+ *
+ * @param {string} a - 比較文字列1
+ * @param {string} b - 比較文字列2
+ * @returns {number} Levenshtein距離（0 = 完全一致、増加 = 差異が大きい）
+ *
+ * @example
+ * lev('count', 'cunt')  // 1 (1文字削除で一致)
+ * lev('name', 'name')   // 0 (完全一致)
+ * lev('abc', 'xyz')     // 3 (すべて異なる)
+ */
 function lev(a, b) {
+  // ── 動的計画法テーブルの初期化 ──
   const m = a.length, n = b.length;
   const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+  // 最初の行と列（基本ケース）
   for (let i = 0; i <= m; i++) dp[i][0] = i;
   for (let j = 0; j <= n; j++) dp[0][j] = j;
+  // ── テーブルを埋める ──
+  // 各セル (i,j) は a[0..i] と b[0..j] の距離
   for (let i = 1; i <= m; i++)
     for (let j = 1; j <= n; j++)
-      dp[i][j] = Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+(a[i-1]===b[j-1]?0:1));
+      dp[i][j] = Math.min(
+        dp[i-1][j]+1,                                    // 削除
+        dp[i][j-1]+1,                                    // 挿入
+        dp[i-1][j-1]+(a[i-1]===b[j-1]?0:1)  // 置換または一致
+      );
   return dp[m][n];
 }
 
+// ═══════════════════════════════════════════
+// モジュールエクスポート
+// ═══════════════════════════════════════════
+/**
+ * VS Code拡張機能のエクスポート
+ *
+ * activate: 拡張機能ロード時に呼び出し（プロバイダー登録、イベントリスナー設定）
+ * deactivate: 拡張機能アンロード時に呼び出し（リソース解放）
+ */
 module.exports = { activate, deactivate };

@@ -1,34 +1,89 @@
+/**
+ * Flare Compiler Core Library
+ *
+ * Compiles .flare files (Flare component definitions) to Web Components.
+ *
+ * ARCHITECTURE:
+ * This compiler implements a 5-phase pipeline:
+ *
+ * Phase 1 (Split):       Extract <meta>, <script>, <template>, <style> blocks from source
+ * Phase 2 (Parse):       Parse each block:
+ *                        - Script: state, prop, computed, fn, emit, ref, watch, provide, consume, lifecycle, import, type declarations
+ *                        - Template: Recursive HTML parser with support for {{}} interpolation, <#if>, <#for>
+ *                        - Meta: Key-value pairs (name, shadow, form, extends)
+ *                        - Style: CSS (minified during code generation)
+ * Phase 3 (Type Check):  Build symbol table, validate types, check template variable references
+ * Phase 4 (Code Generate): Transform AST to Web Component class with event binding system
+ * Phase 5 (Output):      Return compiled JS (or TS with .d.ts declarations)
+ *
+ * KEY PATTERNS:
+ * - txSafe(expr, replacements): String-aware identifier replacement (avoids replacing inside string literals)
+ * - data-flare-id: Unique event binding targets in template (supports dynamic IDs in loops)
+ * - Private fields (#name): All internal state/methods are private to prevent external access
+ *
+ * @author Flare Team
+ * @version 1.0.0
+ */
+
 // ============================================================
-// Flare Compiler Core Library
-// Phases: Split → Parse → Type Check → Code Generate
+// PHASE 1: Block Splitter
 // ============================================================
 
-// ─── Phase 1: Block Splitter ───
+/**
+ * Phase 1: Split source file into semantic blocks.
+ *
+ * Extracts <meta>, <script>, <template>, <style> blocks using regex.
+ * Normalizes line breaks and tracks line numbers for diagnostics.
+ *
+ * @param {string} source - Raw .flare file content
+ * @returns {Array<{type: string, content: string, startLine: number}>} Extracted blocks
+ * @description
+ * この関数は .flare ファイルをセマンティックブロックに分割します。
+ * 各ブロックには開始行番号が記録され、エラー診断に使用されます。
+ */
 function splitBlocks(source) {
-  // P1-12: Normalize CRLF line breaks
+  // Normalize CRLF (Windows) and CR (old Mac) line breaks to LF (Unix)
   source = source.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const blocks = [];
+  // Regex captures: (1) block type, (2) attributes (optional), (3) block content
+  // Using [\s\S]*? for non-greedy any-character matching (including newlines)
   const re = /<(meta|script|template|style)(\s[^>]*)?>([\s\S]*?)<\/\1>/g;
   let m;
   while ((m = re.exec(source)) !== null) {
     blocks.push({
-      type: m[1],
-      content: m[3],
-      startLine: source.substring(0, m.index).split('\n').length,
+      type: m[1],         // Block type: 'meta', 'script', 'template', or 'style'
+      content: m[3],      // Block content (everything between opening and closing tags)
+      startLine: source.substring(0, m.index).split('\n').length,  // 1-indexed line number
     });
   }
   return blocks;
 }
 
 // ─── Helper: Smart comma split that respects bracket nesting ───
+
+/**
+ * Split a string by commas, but only at depth 0 (respecting brackets and quotes).
+ *
+ * Used to parse type parameters and function arguments where commas inside
+ * brackets (e.g., `string | number, Record<string, number>`) should not split.
+ *
+ * @param {string} s - String to split
+ * @returns {string[]} Array of parts, trimmed
+ * @example
+ * smartSplit("string, number | boolean") // ["string", "number | boolean"]
+ * smartSplit("Record<string, number>, Array") // ["Record<string, number>", "Array"]
+ */
 function smartSplit(s) {
   const parts = [];
   let current = '';
-  let depth = 0;
+  let depth = 0;  // Tracks nesting depth of brackets
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
+    // Increment depth for opening brackets (only if not inside string)
     if ((ch === '{' || ch === '[') && !isInString(s, i)) depth++;
+    // Decrement depth for closing brackets (only if not inside string)
     else if ((ch === '}' || ch === ']') && !isInString(s, i)) depth--;
+    // Split on commas at depth 0 (only if not inside string)
     else if (ch === ',' && depth === 0 && !isInString(s, i)) {
       parts.push(current.trim());
       current = '';
@@ -40,61 +95,160 @@ function smartSplit(s) {
   return parts;
 }
 
+/**
+ * Check if a position in a string is inside a string literal.
+ *
+ * Walks forward through the string tracking quote state.
+ * Handles escaped quotes (\'', \", \`).
+ * This is a linear scan and used by smartSplit and other parsing functions.
+ *
+ * @param {string} s - String to scan
+ * @param {number} pos - Position to check
+ * @returns {boolean} True if position is inside a quoted string
+ * @description
+ * この関数は単純な線形スキャンで引用符の状態を追跡します。
+ * バックスラッシュでエスケープされた引用符は無視されます。
+ */
 function isInString(s, pos) {
-  let inStr = false, strChar = '';
+  let inStr = false,      // Are we currently inside a string?
+      strChar = '';        // Which quote character opened the current string?
   for (let i = 0; i < pos; i++) {
+    // Check for quote characters (handle escapes with backslash)
     if ((s[i] === '"' || s[i] === "'" || s[i] === '`') && s[i-1] !== '\\') {
-      if (!inStr) { inStr = true; strChar = s[i]; }
-      else if (s[i] === strChar) { inStr = false; }
+      if (!inStr) {
+        // Entering a string
+        inStr = true;
+        strChar = s[i];
+      }
+      else if (s[i] === strChar) {
+        // Exiting a string (matching quote found)
+        inStr = false;
+      }
     }
   }
   return inStr;
 }
 
-// P2-32: Helper to safely extract primitive name from type or return null for union/array/object types
+/**
+ * Extract primitive type name from a type object.
+ *
+ * Returns null for complex types (union, array, object) since those
+ * don't have a single primitive name. Used when determining default values
+ * for props and coercion functions.
+ *
+ * @param {Object} t - Type object with {kind, name} properties
+ * @returns {string|null} Primitive name ('string', 'number', 'boolean', etc.) or null
+ * @example
+ * typeName({kind: 'primitive', name: 'number'}) // 'number'
+ * typeName({kind: 'array', element: {...}})     // null
+ */
 function typeName(t) {
   if (!t) return null;
   if (t.kind === 'primitive' && t.name) return t.name;
   return null;
 }
 
-// ─── Type Parser ───
-// P2-29: Add recursion depth limit to prevent stack overflow
+// ============================================================
+// Type Parser
+// ============================================================
+
+/**
+ * Parse a type string into an internal type AST.
+ *
+ * Supports:
+ * - Primitives: string, number, boolean, void, null, undefined
+ * - Arrays: string[], number[][], etc. (recursive)
+ * - Union types: string | number | boolean
+ * - Literal types: "value" (string literal)
+ * - Object types: {name: string, age: number, email?: string}
+ *
+ * Implements recursion depth limit (max 20) to prevent stack overflow
+ * on malformed types.
+ *
+ * @param {string} raw - Raw type string to parse
+ * @param {number} [depth=0] - Current recursion depth (internal use)
+ * @returns {Object} Type AST: {kind, name|element|types|value|fields}
+ * @description
+ * この関数は型文字列を内部表現に変換します。
+ * 深さ制限により、無限再帰による無限ループを防ぎます。
+ */
 function parseType(raw, depth = 0) {
-  // P2-29: Max depth 20 to prevent infinite recursion
+  // Safety: prevent stack overflow on malformed types with high nesting
+  // 例: type T = T[][][][] (実際には構文エラー但し無限になるのを防ぐ)
   if (depth > 20) return { kind: 'primitive', name: 'any' };
 
   const s = raw.trim();
+
+  // Handle array types: string[] -> {kind: 'array', element: {kind: 'primitive', name: 'string'}}
   if (s.endsWith('[]')) return { kind: 'array', element: parseType(s.slice(0, -2), depth + 1) };
+
+  // Handle union types: string | number -> {kind: 'union', types: [...]}
   if (s.includes('|')) {
     return { kind: 'union', types: s.split('|').map(p => {
       const t = p.trim();
+      // Literal type in union: "active" | "inactive"
       if (t.startsWith('"') || t.startsWith("'")) return { kind: 'literal', value: t.replace(/["']/g, '') };
       return parseType(t, depth + 1);
     })};
   }
+
+  // Handle primitive types
   if (['string','number','boolean','void','null','undefined'].includes(s))
     return { kind: 'primitive', name: s };
+
+  // Handle literal string types: "value"
   if (s.startsWith('"') || s.startsWith("'"))
     return { kind: 'literal', value: s.replace(/["']/g, '') };
+
+  // Handle object types: {field: type, ...}
   if (s.startsWith('{') && s.endsWith('}')) {
     const fields = [];
     for (const fp of smartSplit(s.slice(1,-1)).filter(Boolean)) {
+      // Match: fieldName?: fieldType
       const fm = fp.match(/^(\w+)(\?)?\s*:\s*(.+)$/);
-      if (fm) fields.push({ name: fm[1], type: parseType(fm[3], depth + 1), optional: fm[2]==='?' });
+      if (fm) fields.push({
+        name: fm[1],
+        type: parseType(fm[3], depth + 1),
+        optional: fm[2]==='?'  // Optional field marker
+      });
     }
     return { kind: 'object', fields };
   }
+
+  // Default: treat as custom type name (imported class, interface, etc.)
   return { kind: 'primitive', name: s };
 }
 
-// ─── Phase 2: Meta Parser ───
+// ============================================================
+// PHASE 2: Meta Block Parser
+// ============================================================
+
+/**
+ * Parse the <meta> block to extract component metadata.
+ *
+ * Supported properties:
+ * - name: Custom element tag name (e.g., 'my-component')
+ * - shadow: Shadow DOM mode ('open', 'closed', 'none')
+ * - form: Whether component is a form-associated custom element (true/false)
+ * - extends: Base class to extend (not yet implemented)
+ *
+ * Ignores empty lines and lines starting with //
+ * Strips inline comments from values
+ *
+ * @param {string} content - Content of <meta> block
+ * @returns {Object} Metadata object {name, shadow, form, extends}
+ * @description
+ * メタブロックの形式:
+ * name: my-component
+ * shadow: open
+ * form: false
+ */
 function parseMeta(content) {
   const meta = {};
   for (const line of content.split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('//'))) {
     const m = line.match(/^(\w+)\s*:\s*(.+)$/);
     if (!m) continue;
-    // P1-23: Strip inline comments from value
+    // Strip inline comments and surrounding quotes from value
     let val = m[2].trim().replace(/\s*\/\/.*$/, '').trim().replace(/^["']|["']$/g, '');
     switch(m[1]) {
       case 'name': meta.name = val; break;
@@ -106,21 +260,67 @@ function parseMeta(content) {
   return meta;
 }
 
-// ─── Helper: Count braces while ignoring string literals and comments ───
+/**
+ * Count brace balance on a single line, ignoring string literals and comments.
+ *
+ * Used to track multi-line function and block parsing in parseScript().
+ * Returns (opening braces) - (closing braces) to determine if a block is complete.
+ *
+ * Example:
+ * countBraces("fn myFunc() {") returns 1 (incomplete block)
+ * countBraces("  return x + y;") returns 0 (inside block)
+ * countBraces("}") returns -1 (closing the block)
+ *
+ * @param {string} line - Single line of code
+ * @returns {number} Net brace balance (positive = unmatched opens, negative = unmatched closes)
+ * @description
+ * この関数は、文字列やコメント内の括弧を無視して、
+ * 実際のコードの括弧数のバランスを計算します。
+ */
 function countBraces(line) {
+  // Strip all string literals and comments to avoid counting braces inside them
   let stripped = line
-    .replace(/"(?:[^"\\]|\\.)*"/g, ' ')    // Strip double-quoted strings
+    .replace(/"(?:[^"\\]|\\.)*"/g, ' ')    // Strip double-quoted strings (handle escapes)
     .replace(/'(?:[^'\\]|\\.)*'/g, ' ')    // Strip single-quoted strings
-    .replace(/`(?:[^`\\]|\\.)*`/g, ' ')    // Strip backtick strings
-    .replace(/\/\/.*$/g, ' ');              // Strip comments
+    .replace(/`(?:[^`\\]|\\.)*`/g, ' ')    // Strip template literal backticks
+    .replace(/\/\/.*$/g, ' ');              // Strip inline comments
   const opens = (stripped.match(/\{/g) || []).length;
   const closes = (stripped.match(/\}/g) || []).length;
   return opens - closes;
 }
 
-// ─── Phase 2: Script Parser ───
+// ============================================================
+// PHASE 2: Script Block Parser
+// ============================================================
+
+/**
+ * Parse the <script> block to extract all declarations.
+ *
+ * Recognizes these declaration types:
+ * - import: Module imports (default, named, namespace)
+ * - type: Type aliases (e.g., type Status = 'active' | 'inactive')
+ * - state: Reactive state variables (e.g., state count: number = 0)
+ * - prop: Component properties (e.g., prop title: string = "Default")
+ * - computed: Derived state (e.g., computed doubled: number = count * 2)
+ * - emit: Event declarations (e.g., emit onChange: string)
+ * - ref: DOM element references (e.g., ref inputEl: HTMLInputElement)
+ * - fn: Methods (e.g., fn increment() { ... })
+ * - watch: Reactive watchers (e.g., watch(count) { ... })
+ * - provide: Context provider values (e.g., provide user: User = currentUser)
+ * - consume: Context consumer declarations (e.g., consume user: User)
+ * - on mount|unmount|adopt: Lifecycle hooks
+ *
+ * Multi-line declarations are automatically collected using countBraces().
+ *
+ * @param {string} content - Content of <script> block
+ * @param {number} startLine - Starting line number (for diagnostics)
+ * @returns {Array<Object>} Array of declaration objects
+ * @description
+ * この関数は、スクリプトブロックをラインバイラインでパースします。
+ * 複数行にわたる関数やwatchブロックは、括弧のバランスで終了を判定します。
+ */
 function parseScript(content, startLine) {
-  // P1-12: Normalize CRLF line breaks
+  // Normalize CRLF (Windows) and CR (old Mac) to LF (Unix)
   content = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const decls = [];
   const lines = content.split('\n');
@@ -128,98 +328,238 @@ function parseScript(content, startLine) {
   while (i < lines.length) {
     const line = lines[i].trim();
     const ln = startLine + i;
+    // Skip empty lines and comments
     if (!line || line.startsWith('//')) { i++; continue; }
 
     let m;
-    // P1-11: Support import * as ns, import Default, { Named }, and mixed imports
+
+    // ─── Import declarations ───
+    // Support: import * as ns from "mod"
+    // Support: import Default from "mod"
+    // Support: import { Named1, Named2 } from "mod"
+    // Support: import Default, { Named1, Named2 } from "mod"
     if ((m = line.match(/^import\s+\*\s+as\s+(\w+)\s+from\s+["']([^"']+)["']/))) {
-      // import * as ns from "mod"
-      decls.push({ kind:'import', defaultImport:undefined, namedImports:[`*:${m[1]}`], from:m[2], span:{line:ln} });
+      decls.push({
+        kind:'import',
+        defaultImport: undefined,
+        namedImports: [`*:${m[1]}`],  // Namespace import stored as *:name
+        from: m[2],
+        span: {line: ln}
+      });
       i++; continue;
     }
     if ((m = line.match(/^import\s+(\w+)\s*,\s*{\s*([^}]+)\s*}\s+from\s+["']([^"']+)["']/))) {
-      // import Default, { Named1, Named2 } from "mod"
+      // Default import with named imports
       const named = m[2].split(',').map(s=>s.trim());
-      decls.push({ kind:'import', defaultImport:m[1], namedImports:named, from:m[3], span:{line:ln} });
+      decls.push({
+        kind:'import',
+        defaultImport: m[1],
+        namedImports: named,
+        from: m[3],
+        span: {line: ln}
+      });
       i++; continue;
     }
     if ((m = line.match(/^import\s+(?:(\w+)\s+from\s+|{([^}]+)}\s+from\s+)["']([^"']+)["']/))) {
-      decls.push({ kind:'import', defaultImport:m[1], namedImports:m[2]?.split(',').map(s=>s.trim()), from:m[3], span:{line:ln} });
+      // Default-only or named-only imports
+      decls.push({
+        kind:'import',
+        defaultImport: m[1],
+        namedImports: m[2]?.split(',').map(s=>s.trim()),
+        from: m[3],
+        span: {line: ln}
+      });
       i++; continue;
     }
+
+    // ─── Type aliases ───
     if ((m = line.match(/^type\s+(\w+)\s*=\s*(.+)$/))) {
-      decls.push({ kind:'type', name:m[1], type:parseType(m[2]), span:{line:ln} });
+      decls.push({
+        kind:'type',
+        name: m[1],
+        type: parseType(m[2]),
+        span: {line: ln}
+      });
       i++; continue;
     }
+    // ─── State declarations ───
+    // Format: state varName: type = initialValue
     if ((m = line.match(/^state\s+(\w+)\s*:\s*([^=]+)\s*=\s*(.+)$/))) {
-      decls.push({ kind:'state', name:m[1], type:parseType(m[2].trim()), init:m[3].trim(), span:{line:ln} });
+      decls.push({
+        kind:'state',
+        name: m[1],
+        type: parseType(m[2].trim()),
+        init: m[3].trim(),  // Initial value expression
+        span: {line: ln}
+      });
       i++; continue;
     }
+
+    // ─── Prop declarations ───
+    // Format: prop varName: type [= defaultValue]
+    // Default value is optional for props (fall back to type-specific defaults)
     if ((m = line.match(/^prop\s+(\w+)\s*:\s*([^=]+?)(?:\s*=\s*(.+))?$/))) {
-      decls.push({ kind:'prop', name:m[1], type:parseType(m[2].trim()), default:m[3]?.trim(), span:{line:ln} });
+      decls.push({
+        kind:'prop',
+        name: m[1],
+        type: parseType(m[2].trim()),
+        default: m[3]?.trim(),  // Optional default value
+        span: {line: ln}
+      });
       i++; continue;
     }
+
+    // ─── Computed declarations ───
+    // Format: computed varName: type = expression
+    // Computed values are derived (read-only)
     if ((m = line.match(/^computed\s+(\w+)\s*:\s*([^=]+)\s*=\s*(.+)$/))) {
-      decls.push({ kind:'computed', name:m[1], type:parseType(m[2].trim()), expr:m[3].trim(), span:{line:ln} });
+      decls.push({
+        kind:'computed',
+        name: m[1],
+        type: parseType(m[2].trim()),
+        expr: m[3].trim(),  // Expression to compute
+        span: {line: ln}
+      });
       i++; continue;
     }
+
+    // ─── Emit declarations ───
+    // Format: emit [options] eventName: detailType
+    // Options: (local) (bubbles) (composed) - no options = bubbles + composed
     if ((m = line.match(/^emit(?:\(([^)]*)\))?\s+(\w+)\s*:\s*(.+)$/))) {
       const rawOpts = m[1] || '';
       const opts = rawOpts ? rawOpts.split(',').map(s => s.trim().toLowerCase()) : [];
       const emitOpts = {};
       if (opts.includes('local')) {
+        // 'local' is shorthand for non-bubbling, non-composed
         emitOpts.bubbles = false;
         emitOpts.composed = false;
       } else {
+        // Default: bubbles and composed unless explicitly disabled
         emitOpts.bubbles = opts.length === 0 || opts.includes('bubbles');
         emitOpts.composed = opts.length === 0 || opts.includes('composed');
       }
-      decls.push({ kind:'emit', name:m[2], type:parseType(m[3].trim()), options: emitOpts, span:{line:ln} });
+      decls.push({
+        kind:'emit',
+        name: m[2],
+        type: parseType(m[3].trim()),
+        options: emitOpts,
+        span: {line: ln}
+      });
       i++; continue;
     }
+
+    // ─── Ref declarations ───
+    // Format: ref varName: ElementType
+    // Used to hold references to DOM elements
     if ((m = line.match(/^ref\s+(\w+)\s*:\s*(.+)$/))) {
-      decls.push({ kind:'ref', name:m[1], type:parseType(m[2].trim()), span:{line:ln} });
+      decls.push({
+        kind:'ref',
+        name: m[1],
+        type: parseType(m[2].trim()),
+        span: {line: ln}
+      });
       i++; continue;
     }
+    // ─── Function declarations ───
+    // Format: [async] fn funcName(param1: type1, param2: type2): returnType { ... }
     if ((m = line.match(/^fn\s+(async\s+)?(\w+)\s*\(([^)]*)\)(?:\s*:\s*(\w+))?\s*\{/))) {
       const params = [];
-      if (m[3].trim()) for (const p of m[3].split(',')) {
-        const pm = p.trim().match(/^(\w+)\s*:\s*(.+)$/);
-        if (pm) params.push({ name:pm[1], type:parseType(pm[2]) });
+      if (m[3].trim()) {
+        for (const p of m[3].split(',')) {
+          const pm = p.trim().match(/^(\w+)\s*:\s*(.+)$/);
+          if (pm) params.push({ name:pm[1], type:parseType(pm[2]) });
+        }
       }
-      let body='', bc=1; i++;
+      // Multi-line function body: collect lines until braces balance
+      let body='', bc=1;
+      i++;
       while (i<lines.length && bc>0) {
-        const l=lines[i]; bc+=countBraces(l);
-        if (bc>0) body+=(body?'\n':'')+l; i++;
+        const l=lines[i];
+        bc+=countBraces(l);
+        if (bc>0) body+=(body?'\n':'')+l;
+        i++;
       }
-      decls.push({ kind:'fn', name:m[2], async:!!m[1], params, returnType:m[4]?parseType(m[4]):undefined, body:body.trim(), span:{line:ln} });
+      decls.push({
+        kind:'fn',
+        name: m[2],
+        async: !!m[1],  // True if 'async' keyword present
+        params: params,
+        returnType: m[4] ? parseType(m[4]) : undefined,
+        body: body.trim(),
+        span: {line: ln}
+      });
       continue;
     }
+
+    // ─── Lifecycle hooks ───
+    // Format: on mount|unmount|adopt { ... }
     if ((m = line.match(/^on\s+(mount|unmount|adopt)\s*\{/))) {
-      let body='', bc=1; i++;
+      // Multi-line block: collect until braces balance
+      let body='', bc=1;
+      i++;
       while (i<lines.length && bc>0) {
-        const l=lines[i]; bc+=countBraces(l);
-        if (bc>0) body+=(body?'\n':'')+l; i++;
+        const l=lines[i];
+        bc+=countBraces(l);
+        if (bc>0) body+=(body?'\n':'')+l;
+        i++;
       }
-      decls.push({ kind:'lifecycle', event:m[1], body:body.trim(), span:{line:ln} });
+      decls.push({
+        kind:'lifecycle',
+        event: m[1],  // 'mount', 'unmount', or 'adopt'
+        body: body.trim(),
+        span: {line: ln}
+      });
       continue;
     }
+
+    // ─── Watch declarations ───
+    // Format: watch(dep1, dep2, dep3) { ... }
+    // Triggered when any of the dependencies change
     if ((m = line.match(/^watch\s*\(([^)]+)\)\s*\{/))) {
-      const deps=m[1].split(',').map(d=>d.trim());
-      let body='', bc=1; i++;
+      const deps = m[1].split(',').map(d=>d.trim());
+      // Multi-line block: collect until braces balance
+      let body='', bc=1;
+      i++;
       while (i<lines.length && bc>0) {
-        const l=lines[i]; bc+=countBraces(l);
-        if (bc>0) body+=(body?'\n':'')+l; i++;
+        const l=lines[i];
+        bc+=countBraces(l);
+        if (bc>0) body+=(body?'\n':'')+l;
+        i++;
       }
-      decls.push({ kind:'watch', deps, body:body.trim(), span:{line:ln} });
+      decls.push({
+        kind:'watch',
+        deps: deps,
+        body: body.trim(),
+        span: {line: ln}
+      });
       continue;
     }
+
+    // ─── Provide declarations ───
+    // Format: provide varName: type = initialValue
+    // Used for context/dependency injection
     if ((m = line.match(/^provide\s+(\w+)\s*:\s*([^=]+)\s*=\s*(.+)$/))) {
-      decls.push({ kind:'provide', name:m[1], type:parseType(m[2].trim()), init:m[3].trim(), span:{line:ln} });
+      decls.push({
+        kind:'provide',
+        name: m[1],
+        type: parseType(m[2].trim()),
+        init: m[3].trim(),
+        span: {line: ln}
+      });
       i++; continue;
     }
+
+    // ─── Consume declarations ───
+    // Format: consume varName: type
+    // Used to subscribe to provided context
     if ((m = line.match(/^consume\s+(\w+)\s*:\s*(.+)$/))) {
-      decls.push({ kind:'consume', name:m[1], type:parseType(m[2].trim()), span:{line:ln} });
+      decls.push({
+        kind:'consume',
+        name: m[1],
+        type: parseType(m[2].trim()),
+        span: {line: ln}
+      });
       i++; continue;
     }
     i++;
@@ -227,83 +567,300 @@ function parseScript(content, startLine) {
   return decls;
 }
 
-// ─── Phase 2: Template Parser ───
+// ============================================================
+// PHASE 2: Template Block Parser
+// ============================================================
+
+/**
+ * Recursively parse HTML template nodes.
+ *
+ * Recognizes and parses:
+ * - Text nodes (raw HTML text)
+ * - Interpolation {{ expression }}
+ * - Element nodes <tag attr="value">...</tag>
+ * - If blocks <#if condition="expr"> ... <:else-if> ... <:else> ... </#if>
+ * - For loops <#for each="item" of="array" key="id"> ... <:empty> ... </#for>
+ *
+ * This is the main entry point for template parsing.
+ *
+ * @param {string} html - HTML template string
+ * @param {Array} [errors] - Diagnostics array (optional, populated with warnings)
+ * @returns {Array<Object>} AST nodes (text, interpolation, element, if, for)
+ * @description
+ * テンプレートを再帰的にパースします。
+ * 左から右へスキャンし、各ノードタイプを認識します。
+ */
 function parseTemplateNodes(html, errors) {
   const errs = errors || [];
   const nodes = [];
   let pos = 0;
+
   while (pos < html.length) {
+    // ─── Interpolation nodes {{ expr }} ───
     if (html.startsWith('{{', pos)) {
       const end = html.indexOf('}}', pos+2);
       if (end!==-1) {
-        nodes.push({ kind:'interpolation', expr:html.substring(pos+2,end).trim() });
-        pos=end+2;
+        nodes.push({
+          kind:'interpolation',
+          expr: html.substring(pos+2, end).trim()
+        });
+        pos = end + 2;
         continue;
       } else {
         // Unclosed {{ - emit warning and treat as text
-        errs.push({ level: 'warning', code: 'W0301', message: 'Unclosed {{ in template' });
+        errs.push({
+          level: 'warning',
+          code: 'W0301',
+          message: 'Unclosed {{ in template'
+        });
         nodes.push({ kind:'text', value:'{{' });
-        pos+=2;
+        pos += 2;
         continue;
       }
     }
-    if (html.startsWith('<#if', pos)) { const r=parseIfBlock(html,pos); nodes.push(r.node); pos=r.end; continue; }
-    if (html.startsWith('<#for', pos)) { const r=parseForBlock(html,pos); nodes.push(r.node); pos=r.end; continue; }
-    if (html[pos]==='<' && html[pos+1]!=='/' && !html.startsWith('<:',pos) && !html.startsWith('<#',pos)) {
-      const r=parseElement(html,pos); if(r){nodes.push(r.node);pos=r.end;continue;}
+
+    // ─── Control flow blocks ───
+    if (html.startsWith('<#if', pos)) {
+      const r = parseIfBlock(html, pos);
+      nodes.push(r.node);
+      pos = r.end;
+      continue;
     }
-    const next=findNext(html,pos); const text=html.substring(pos,next);
+    if (html.startsWith('<#for', pos)) {
+      const r = parseForBlock(html, pos);
+      nodes.push(r.node);
+      pos = r.end;
+      continue;
+    }
+
+    // ─── Element nodes ───
+    // Check for opening tag (but not closing tag </tag> or special tags <: and <#)
+    if (html[pos]==='<' && html[pos+1]!=='/' && !html.startsWith('<:',pos) && !html.startsWith('<#',pos)) {
+      const r = parseElement(html, pos);
+      if(r) {
+        nodes.push(r.node);
+        pos = r.end;
+        continue;
+      }
+    }
+
+    // ─── Text nodes ───
+    const next = findNext(html, pos);
+    const text = html.substring(pos, next);
     if (text.trim()) nodes.push({ kind:'text', value:text });
-    pos=next;
+    pos = next;
   }
   return nodes;
 }
-function findNext(html,pos){let min=html.length;for(const m of['{{','<#if','<#for','<']){const i=html.indexOf(m,pos+1);if(i!==-1&&i<min)min=i;}return min;}
+/**
+ * Find the position of the next template syntax element.
+ *
+ * Scans for the nearest occurrence of: {{, <#if, <#for, or <
+ * Used to identify text content before the next element.
+ *
+ * @param {string} html - Template HTML
+ * @param {number} pos - Current scan position
+ * @returns {number} Position of next syntax element, or html.length if none found
+ */
+function findNext(html,pos){
+  let min=html.length;
+  for(const m of['{{','<#if','<#for','<']){
+    const i=html.indexOf(m,pos+1);
+    if(i!==-1&&i<min)min=i;
+  }
+  return min;
+}
+
+/**
+ * Parse an HTML element node (opening tag, attributes, children, closing tag).
+ *
+ * Handles:
+ * - Self-closing elements: <tag ... />
+ * - Normal elements: <tag ...> children </tag>
+ * - Custom elements (must use closing tag, not self-closing)
+ * - Missing close tags (emitted as diagnostic warning)
+ * - Nested elements with proper depth tracking
+ *
+ * @param {string} html - Full template HTML
+ * @param {number} pos - Position of opening < character
+ * @returns {Object|null} {node, end} or null if not a valid element
+ * @description
+ * 要素のネストを正しく追跡します。
+ * タグ名の完全一致を確認して、<button> を <but で誤認識しません。
+ */
 function parseElement(html,pos){
+  // Match opening tag: <tag attr="value" />
   const m=html.substring(pos).match(/^<([a-zA-Z][\w-]*)((?:\s+[^>]*?)?)(\s*\/?)>/);
   if(!m)return null;
-  const tag=m[1],attrsStr=m[2],self=m[3].includes('/'),tagEnd=pos+m[0].length;
+
+  const tag=m[1],          // Tag name
+        attrsStr=m[2],      // Attributes string
+        self=m[3].includes('/'),  // Self-closing?
+        tagEnd=pos+m[0].length;
+
   const attrs=parseAttrs(attrsStr);
-  if(self)return{node:{kind:'element',tag,attrs,children:[],selfClosing:true},end:tagEnd};
-  const close=`</${tag}>`;let depth=1,sp=tagEnd;
-  while(depth>0&&sp<html.length){
-    const no=html.indexOf(`<${tag}`,sp),nc=html.indexOf(close,sp);
-    if(nc===-1)break;
-    if(no!==-1&&no<nc){
-      // P2-30: Check that next char after tag name is whitespace, > or / (not partial match like <but for <button)
+
+  // Self-closing elements
+  if(self) {
+    return {
+      node: {kind:'element', tag, attrs, children:[], selfClosing:true},
+      end: tagEnd
+    };
+  }
+
+  // Regular elements: find matching closing tag with proper nesting
+  const close=`</${tag}>`;
+  let depth=1, sp=tagEnd;
+  while(depth>0 && sp<html.length) {
+    const no=html.indexOf(`<${tag}`, sp),     // Next opening tag
+          nc=html.indexOf(close, sp);          // Next closing tag
+    if(nc===-1) break;
+
+    if(no!==-1 && no<nc) {
+      // Nested opening tag found - but verify it's not a partial match
+      // e.g., <button must not match <but from <button>
       const nextCharIdx=no+tag.length+1;
-      if(nextCharIdx<html.length){
+      if(nextCharIdx<html.length) {
         const nextChar=html[nextCharIdx];
-        if(/[\s>/]/.test(nextChar)){
-          const a=html.indexOf('>',no);if(a!==-1&&html[a-1]!=='/')depth++;sp=a+1;
-        }else{
+        // Valid tag boundaries: whitespace, >, or /
+        if(/[\s>/]/.test(nextChar)) {
+          // Valid nested opening tag
+          const a=html.indexOf('>', no);
+          if(a!==-1 && html[a-1]!=='/') depth++;
+          sp=a+1;
+        } else {
+          // Partial match, skip
           sp=no+tag.length+1;
         }
-      }else{
+      } else {
         sp=no+tag.length+1;
       }
+    } else {
+      // Closing tag is next
+      depth--;
+      if(depth===0) {
+        return {
+          node: {
+            kind:'element',
+            tag,
+            attrs,
+            children: parseTemplateNodes(html.substring(tagEnd, nc)),
+            selfClosing: false
+          },
+          end: nc+close.length
+        };
+      }
+      sp=nc+close.length;
     }
-    else{depth--;if(depth===0)return{node:{kind:'element',tag,attrs,children:parseTemplateNodes(html.substring(tagEnd,nc)),selfClosing:false},end:nc+close.length};sp=nc+close.length;}
   }
-  // P1-13: Close tag mismatch - emit warning diagnostic
-  return{node:{kind:'element',tag,attrs,children:[],selfClosing:true,_missingCloseTag:true},end:tagEnd};
+
+  // Missing closing tag - emit diagnostic and treat as self-closing
+  return {
+    node: {
+      kind:'element',
+      tag,
+      attrs,
+      children: [],
+      selfClosing: true,
+      _missingCloseTag: true  // Flag for diagnostic reporting
+    },
+    end: tagEnd
+  };
 }
+
+/**
+ * Parse element attributes and directives.
+ *
+ * Recognizes:
+ * - Regular attributes: name="value"
+ * - Dynamic bindings: :name="expr"
+ * - Event handlers: @eventName="expr"
+ * - Two-way binding: :bind or :bind.modifier
+ * - Raw HTML: @html="expr"
+ * - Element reference: ref
+ * - Spread: :...name (bind all props from object)
+ * - Modifiers: |prevent|stop|enter|esc (attached to events)
+ *
+ * @param {string} str - Attributes string (between tag name and >)
+ * @returns {Array<Object>} Parsed attributes with metadata
+ */
 function parseAttrs(str){
-  const attrs=[],re=/([:\@]?[\w\-\.]+(?:\|[\w]+)*)(?:\s*=\s*"([^"]*)")?/g;let m;
+  const attrs=[];
+  // Regex matches: optional prefix (:, @) + name + optional modifiers + optional value
+  const re=/([:\@]?[\w\-\.]+(?:\|[\w]+)*)(?:\s*=\s*"([^"]*)")?/g;
+  let m;
   while((m=re.exec(str))!==null){
-    let name=m[1],value=m[2]||'',dynamic=false,event=false,bind=false,ref=false,html=false,spread=false;
-    const parts=name.split('|'),modifiers=parts.slice(1);name=parts[0];
-    if(name===':bind'){bind=true;name='bind';}
-    else if(name.startsWith(':...')){spread=true;name=name.slice(4);}
-    else if(name.startsWith(':')){dynamic=true;name=name.slice(1);}
-    else if(name==='@html'){html=true;name='html';}
-    else if(name.startsWith('@')){event=true;name=name.slice(1);}
+    let name=m[1],
+        value=m[2]||'',
+        dynamic=false,  // :name directive
+        event=false,    // @name directive
+        bind=false,     // :bind directive
+        ref=false,      // ref attribute
+        html=false,     // @html directive
+        spread=false;   // :...name directive
+
+    // Parse modifiers (attached with |) from name
+    const parts=name.split('|'),
+          modifiers=parts.slice(1);
+    name=parts[0];
+
+    // Directive detection
+    if(name===':bind') {bind=true; name='bind';}
+    else if(name.startsWith(':...')) {spread=true; name=name.slice(4);}
+    else if(name.startsWith(':')) {dynamic=true; name=name.slice(1);}
+    else if(name==='@html') {html=true; name='html';}
+    else if(name.startsWith('@')) {event=true; name=name.slice(1);}
     else if(name==='ref'){ref=true;}
     attrs.push({name,value,dynamic,event,bind,ref,modifiers,html,spread});
   }
   return attrs;
 }
-function findMatchingClose(html,start,bt){let d=1,p=start;const o=`<${bt}`,c=`</${bt}>`;while(d>0&&p<html.length){const no=html.indexOf(o,p),nc=html.indexOf(c,p);if(nc===-1)return html.length;if(no!==-1&&no<nc){d++;p=no+o.length;}else{d--;if(d===0)return nc;p=nc+c.length;}}return html.length;}
+/**
+ * Find matching closing tag for a block tag (e.g., <#if ... </#if>).
+ *
+ * Tracks nesting depth to handle nested blocks.
+ * Returns html.length if no matching close found (error case).
+ *
+ * @param {string} html - Full HTML
+ * @param {number} start - Position after opening tag
+ * @param {string} bt - Block tag name (e.g., '#if' or '#for')
+ * @returns {number} Position of matching closing tag's <, or html.length
+ */
+function findMatchingClose(html,start,bt){
+  let d=1, p=start;
+  const o=`<${bt}`,     // Opening tag pattern
+        c=`</${bt}>`;    // Closing tag pattern
+  while(d>0 && p<html.length) {
+    const no=html.indexOf(o,p),
+          nc=html.indexOf(c,p);
+    if(nc===-1) return html.length;
+    if(no!==-1 && no<nc) {
+      d++;
+      p=no+o.length;
+    } else {
+      d--;
+      if(d===0) return nc;
+      p=nc+c.length;
+    }
+  }
+  return html.length;
+}
+
+/**
+ * Parse a conditional block <#if condition="expr"> ... <:else-if> ... <:else> ... </#if>.
+ *
+ * Supports:
+ * - Main condition: <#if condition="expr">
+ * - Else-if chain: <:else-if condition="expr"> (multiple)
+ * - Final else: <:else>
+ *
+ * @param {string} html - Full template HTML
+ * @param {number} pos - Position of <#if
+ * @returns {{node: Object, end: number}} Parsed if node and position after closing tag
+ * @description
+ * 条件付きブロックを再帰的に解析します。
+ * :else-if と :else をサポートしています。
+ */
 function parseIfBlock(html,pos){
   const om=html.substring(pos).match(/<#if\s+condition="([^"]+)">/);
   if(!om){
@@ -351,35 +908,132 @@ function parseIfBlock(html,pos){
   const node = { kind:'if', condition:cond, children:parseTemplateNodes(inner.trim()), elseIfChain: elseIfChain.length > 0 ? elseIfChain : undefined, elseChildren };
   return{node, end:cp+'</#if>'.length};
 }
+/**
+ * Parse a for-loop block <#for each="item" of="array" key="id"> ... <:empty> ... </#for>.
+ *
+ * Supports:
+ * - each: Loop variable name(s) - can be "item" or "item, index" for two-variable iteration
+ * - of: Array/iterable expression to loop over
+ * - key: Unique key expression for each item (used for efficient DOM updates)
+ * - <:empty>: Optional placeholder content when array is empty
+ *
+ * Attributes can be in any order.
+ *
+ * @param {string} html - Full template HTML
+ * @param {number} pos - Position of <#for
+ * @returns {{node: Object, end: number}} Parsed for node and position after closing tag
+ * @description
+ * ループ宣言: <#for each="item, index" of="items" key="item.id">
+ * - each に "item" を指定: item のみ
+ * - each に "item, index" を指定: item と index の両方を利用可能
+ */
 function parseForBlock(html,pos){
-  // Support attributes in any order: each, of, key
+  // Match opening tag with flexible attribute order
   const tagMatch=html.substring(pos).match(/<#for\s+((?:[^>])+)>/);
   if(!tagMatch){
-    // Return error node instead of throwing
     return { node: { kind:'text', value: 'Error: Invalid #for syntax' }, end: pos+1 };
   }
+
   const attrStr=tagMatch[1];
+  // Extract each, of, key attributes (in any order)
   const eachM=attrStr.match(/each="([^"]+)"/);
   const ofM=attrStr.match(/of="([^"]+)"/);
   const keyM=attrStr.match(/key="([^"]+)"/);
-  if(!eachM||!ofM||!keyM){
-    // Return error node instead of throwing
-    return { node: { kind:'text', value: 'Error: Invalid #for: missing required attributes (each, of, key)' }, end: pos+1 };
+
+  if(!eachM||!ofM) {
+    return {
+      node: { kind:'text', value: 'Error: Invalid #for: missing required attributes (each, of)' },
+      end: pos+1
+    };
   }
-  const ep=eachM[1].split(',').map(s=>s.trim()),each=ep[0],index=ep[1],of_=ofM[1],key=keyM[1];
-  const om=tagMatch; // compatibility
-  const sp=pos+om[0].length,cp=findMatchingClose(html,sp,'#for');
-  let inner=html.substring(sp,cp),emptyChildren;
+
+  // Parse 'each' attribute: supports "item" or "item, index"
+  const ep=eachM[1].split(',').map(s=>s.trim()),
+        each=ep[0],      // Loop variable
+        index=ep[1],     // Optional index variable
+        of_=ofM[1],      // Array expression
+        key=keyM?keyM[1]:null;  // Key expression (optional, defaults to index)
+
+  const om=tagMatch;
+  const sp=pos+om[0].length,
+        cp=findMatchingClose(html,sp,'#for');
+  let inner=html.substring(sp,cp),
+      emptyChildren;
+
+  // Extract optional <:empty> block (content when array is empty)
   const emm=inner.match(/<:empty>([\s\S]*?)<\/:empty>/);
-  if(emm&&emm.index!==undefined){emptyChildren=parseTemplateNodes(emm[1]);inner=inner.substring(0,emm.index)+inner.substring(emm.index+emm[0].length);}
-  return{node:{kind:'for',each,index,of:of_,key,children:parseTemplateNodes(inner),emptyChildren},end:cp+'</#for>'.length};
+  if(emm&&emm.index!==undefined) {
+    emptyChildren=parseTemplateNodes(emm[1]);
+    // Remove <:empty> block from inner content
+    inner=inner.substring(0,emm.index)+inner.substring(emm.index+emm[0].length);
+  }
+
+  return {
+    node: {
+      kind:'for',
+      each: each,       // Loop variable name
+      index: index,     // Optional index variable
+      of: of_,          // Array expression
+      key: key,         // Key expression for efficient updates
+      children: parseTemplateNodes(inner),
+      emptyChildren: emptyChildren
+    },
+    end: cp+'</#for>'.length
+  };
 }
 
-// ─── Phase 3: Type Checker ───
+// ============================================================
+// PHASE 3: Type Checker
+// ============================================================
+
+/**
+ * Type checking and validation of the entire component.
+ *
+ * Responsibilities:
+ * 1. Build symbol table from script declarations
+ * 2. Check script: validate state/prop initial values, detect computed order issues, warn about watch nesting
+ * 3. Check template: validate variable references, check for undefined identifiers, detect XSS/injection risks
+ * 4. Detect unused state variables
+ * 5. Report security warnings (@html, dynamic href/src)
+ *
+ * Generates diagnostics (errors and warnings) for the user.
+ *
+ * @description
+ * 型チェッカーは以下を実行します:
+ * - シンボル テーブルの構築 (state, prop, computed, fn, emit, ref, provide, consume, import)
+ * - 型互換性チェック (初期値, デフォルト値)
+ * - テンプレート変数の参照チェック (未定義の識別子を検出)
+ * - セキュリティ警告 (@html, 動的な href/src, 静的な id 属性)
+ */
 class TypeChecker {
-  constructor(component){this.c=component;this.symbols=new Map();this.diags=[];this.typeAliases=new Map();}
-  check(){this.buildSymbols();this.checkScript();this.checkTemplate(this.c.template);this.checkUnused();return this.diags;}
-  buildSymbols(){for(const d of this.c.script){switch(d.kind){case'import':
+  constructor(component){
+    this.c=component;              // Component AST
+    this.symbols=new Map();        // Symbol table: name -> {type, source}
+    this.diags=[];                 // Diagnostics (errors and warnings)
+    this.typeAliases=new Map();    // Type alias lookup table
+  }
+
+  /**
+   * Run all type checks and return diagnostics.
+   */
+  check(){
+    this.buildSymbols();
+    this.checkScript();
+    this.checkTemplate(this.c.template);
+    this.checkUnused();
+    return this.diags;
+  }
+
+  /**
+   * Build symbol table from all script declarations.
+   *
+   * Registers all identifiers (state, prop, computed, fn, emit, ref, etc.)
+   * so they can be referenced in template expressions.
+   */
+  buildSymbols(){
+    for(const d of this.c.script){
+      switch(d.kind){
+        case'import':
       // P1-14: Add imported symbols to symbol table
       if(d.defaultImport)this.symbols.set(d.defaultImport,{type:{kind:'primitive',name:'any'},source:'import'});
       if(d.namedImports)for(const ni of d.namedImports){const name=ni.includes(':')?ni.split(':')[1]:ni;this.symbols.set(name,{type:{kind:'primitive',name:'any'},source:'import'});}
@@ -470,23 +1124,63 @@ class TypeChecker {
 }
 function lev(a,b){const m=a.length,n=b.length,dp=Array.from({length:m+1},()=>Array(n+1).fill(0));for(let i=0;i<=m;i++)dp[i][0]=i;for(let j=0;j<=n;j++)dp[0][j]=j;for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)dp[i][j]=Math.min(dp[i-1][j]+1,dp[i][j-1]+1,dp[i-1][j-1]+(a[i-1]===b[j-1]?0:1));return dp[m][n];}
 
-// ─── Type to TypeScript string ───
+// ============================================================
+// Type Utilities
+// ============================================================
+
+/**
+ * Convert internal type AST to TypeScript type string.
+ *
+ * Used for:
+ * - Generating .d.ts type declarations
+ * - Generating TypeScript annotations in generated code
+ *
+ * @param {Object} t - Type AST object
+ * @returns {string} TypeScript type string
+ * @example
+ * typeToTs({kind: 'primitive', name: 'string'})          // 'string'
+ * typeToTs({kind: 'array', element: {...}})              // 'T[]'
+ * typeToTs({kind: 'union', types: [{...}, {...}]})        // 'T | U'
+ * typeToTs({kind: 'object', fields: [{name: 'x', ...}]}) // '{ x: T }'
+ */
 function typeToTs(t) {
   if (!t) return 'any';
   switch (t.kind) {
-    case 'primitive': return t.name;
-    case 'array': return `${typeToTs(t.element)}[]`;
-    case 'union': return t.types.map(typeToTs).join(' | ');
-    case 'literal': return `"${t.value}"`;
+    case 'primitive':
+      return t.name;
+    case 'array':
+      return `${typeToTs(t.element)}[]`;
+    case 'union':
+      return t.types.map(typeToTs).join(' | ');
+    case 'literal':
+      return `"${t.value}"`;
     case 'object': {
       const fields = t.fields.map(f => `${f.name}${f.optional ? '?' : ''}: ${typeToTs(f.type)}`);
       return `{ ${fields.join('; ')} }`;
     }
-    default: return 'any';
+    default:
+      return 'any';
   }
 }
 
-// P1-20: Generate .d.ts declaration file for component's public API
+/**
+ * Generate TypeScript type declaration (.d.ts) for the compiled component.
+ *
+ * Creates:
+ * - JSX.IntrinsicElements declaration for JSX support
+ * - Props interface (all prop declarations)
+ * - Events interface (all emit declarations)
+ * - Class declaration with property getters
+ * - Global HTMLElementTagNameMap entry
+ *
+ * Used when target is 'ts' to provide full TypeScript support.
+ *
+ * @param {Object} c - Component AST
+ * @returns {string} TypeScript .d.ts file content
+ * @description
+ * .d.ts ファイルはコンポーネントの型情報を提供し、
+ * IDEのオートコンプリートと型チェックを有効にします。
+ */
 function generateDts(c) {
   const className = c.meta.name.split('-').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('');
   const tagName = c.meta.name;
@@ -536,34 +1230,111 @@ function generateDts(c) {
   return dts;
 }
 
-// ─── Phase 5: Code Generator ───
-function generate(c, options) {
-  const ts = options?.target === 'ts';
-  const sv=[],pv=[],cv=[],en=[],rn=[],fn=[],prov=[],cons=[];
-  for(const d of c.script){switch(d.kind){case'state':sv.push(d.name);break;case'prop':pv.push(d.name);break;case'computed':cv.push(d.name);break;case'emit':en.push(d.name);break;case'ref':rn.push(d.name);break;case'fn':fn.push(d.name);break;case'provide':prov.push(d.name);sv.push(d.name);break;case'consume':cons.push(d.name);break;}}
+// ============================================================
+// PHASE 4: Code Generator
+// ============================================================
 
-  // P1-13: Track elements with missing close tags
+/**
+ * Generate Web Component class code from the component AST.
+ *
+ * Produces a class that extends HTMLElement with:
+ * - Private fields for state, props, computed, refs
+ * - Getters/setters for props with attribute observation
+ * - Methods for event emission and lifecycle hooks
+ * - Template rendering via innerHTML with dynamic expressions
+ * - Event binding system using data-flare-id attributes
+ * - Watch dependency tracking and change detection
+ * - XSS/injection prevention through HTML escaping
+ *
+ * The generated code is wrapped in an IIFE for module isolation
+ * and uses a deferred registration queue for bundle mode.
+ *
+ * @param {Object} c - Component AST
+ * @param {Object} [options] - Code generation options {target: 'ts'|'js'}
+ * @returns {string} Generated Web Component class code
+ * @description
+ * 生成されたコンポーネントの特徴:
+ * - プライベートフィールド (#field) で内部状態を隠蔽
+ * - イベント結合システムで動的 ID を使用した効率的なバインディング
+ * - Watch の依存性を追跡して必要な時だけ実行
+ * - テンプレートリテラルを使用した高速なレンダリング
+ * - XSS 対策のための複数レベルのエスケープ (#esc, #escAttr, #escUrl)
+ */
+function generate(c, options) {
+  const ts = options?.target === 'ts';  // Generate TypeScript annotations?
+
+  // Collect all declaration names by type for later replacement
+  const sv=[],    // state variable names
+        pv=[],    // prop names
+        cv=[],    // computed property names
+        en=[],    // emit event names
+        rn=[],    // ref names
+        fn=[],    // function names
+        prov=[],  // provide names
+        cons=[];  // consume names
+
+  for(const d of c.script){
+    switch(d.kind){
+      case'state':sv.push(d.name);break;
+      case'prop':pv.push(d.name);break;
+      case'computed':cv.push(d.name);break;
+      case'emit':en.push(d.name);break;
+      case'ref':rn.push(d.name);break;
+      case'fn':fn.push(d.name);break;
+      case'provide':prov.push(d.name);sv.push(d.name);break;
+      case'consume':cons.push(d.name);break;
+    }
+  }
+
+  // Track elements with missing close tags for diagnostic reporting
   const missingCloseTagElements = [];
 
+  // ─── Event binding ID generator ───
   let _eid = 0;
   function nextEid() { return `fl-${_eid++}`; }
 
-  // Replace identifiers but skip those inside string literals
+  /**
+   * String-aware identifier replacement helper.
+   *
+   * Critical function: Replaces identifiers with their private field equivalents
+   * (e.g., count -> this.#count) but SKIPS replacements inside string literals.
+   *
+   * This prevents bugs like:
+   * - emit("count") from becoming emit("this.#count")
+   * - "the count is" from becoming "the this.#count is"
+   *
+   * Algorithm:
+   * 1. Scan expression and partition into string and non-string regions
+   * 2. For string regions: preserve as-is
+   * 3. For non-string regions: apply all regex replacements
+   * 4. Join partitions back together
+   *
+   * Special handling for template literals: Track ${} expressions as non-string
+   * so replacements work inside template interpolations.
+   *
+   * @param {string} expr - JavaScript expression to transform
+   * @param {Array<[RegExp, string]>} replacements - [[pattern, replacement], ...]
+   * @returns {string} Transformed expression
+   * @description
+   * この関数は最も重要な変換関数です。
+   * 文字列内の置き換えを避けることで、バグを防ぎます。
+   */
   function txSafe(expr, replacements) {
-    // Split expression into string-literal and non-string parts
+    // Partition expression into string and non-string regions
     const parts = [];
     let i = 0;
     while (i < expr.length) {
       const ch = expr[i];
       if (ch === '"' || ch === "'" || ch === '`') {
-        // Find matching close quote (handle escapes)
+        // String literal: find matching close quote (handle escapes)
         const quote = ch;
         let j = i + 1;
         while (j < expr.length) {
-          if (expr[j] === '\\') { j += 2; continue; }
-          if (expr[j] === quote) { j++; break; }
+          if (expr[j] === '\\') { j += 2; continue; }  // Escaped character
+          if (expr[j] === quote) { j++; break; }        // Found closing quote
+          // Special: template literals can contain ${...} expressions
           if (quote === '`' && expr[j] === '$' && expr[j+1] === '{') {
-            // Template literal expression - find matching }
+            // Track ${...} as code, not string (to allow replacements)
             let depth = 1; j += 2;
             while (j < expr.length && depth > 0) {
               if (expr[j] === '{') depth++;
@@ -578,12 +1349,14 @@ function generate(c, options) {
         parts.push({ text: expr.substring(i, j), isString: true });
         i = j;
       } else {
+        // Non-string: scan until next quote
         let j = i;
         while (j < expr.length && expr[j] !== '"' && expr[j] !== "'" && expr[j] !== '`') j++;
         parts.push({ text: expr.substring(i, j), isString: false });
         i = j;
       }
     }
+
     // Apply replacements only to non-string parts
     return parts.map(p => {
       if (p.isString) return p.text;
@@ -595,34 +1368,217 @@ function generate(c, options) {
     }).join('');
   }
 
+  /**
+   * Build list of identifier replacement patterns.
+   *
+   * Creates regex patterns to transform user code:
+   * - state count -> this.#count (access private field)
+   * - prop title -> this.#prop_title (access prop backing field)
+   * - computed doubled -> this.#doubled (call getter)
+   * - emit(change) -> this.#emit_change( (call emit method)
+   * - fn increment() -> this.#increment() (call method)
+   * - ref inputEl -> this.#inputEl (access ref)
+   * - consume user -> this.#user (access consume value)
+   *
+   * Uses negative lookbehind (?<!#) to avoid double-prefixing (this.##field)
+   *
+   * Sorts by length (longest first) to avoid partial matches.
+   *
+   * @returns {Array<[RegExp, string]>} Replacement patterns
+   */
   function buildReplacements() {
     const reps = [];
-    // Sort all identifiers by length (longest first) to avoid partial matches
+    // Sort all identifiers by length (longest first) to prevent partial matches
+    // e.g., "count" before "c" to avoid matching 'c' in 'count'
     const allIds = [...new Set([...sv, ...pv, ...cv, ...en, ...fn, ...rn, ...cons])];
     allIds.sort((a, b) => b.length - a.length);
 
+    // State variables: myVar -> this.#myVar
     for(const s of sv) reps.push([new RegExp(`(?<!#)\\b${s}\\b`,'g'), `this.#${s}`]);
+
+    // Props: title -> this.#prop_title (props stored in separate fields)
     for(const p of pv) reps.push([new RegExp(`(?<!#)\\b${p}\\b`,'g'), `this.#prop_${p}`]);
+
+    // Computed: doubled -> this.#doubled (calls private getter)
     for(const v of cv) reps.push([new RegExp(`(?<!#)\\b${v}\\b`,'g'), `this.#${v}`]);
+
+    // Emit: emit(change) -> this.#emit_change( (calls emit method)
     for(const e of en) reps.push([new RegExp(`(?<!#)\\b${e}\\(`,'g'), `this.#emit_${e}(`]);
+
+    // Functions: increment() -> this.#increment() (calls private method)
     for(const f of fn) reps.push([new RegExp(`(?<!#)\\b${f}\\(`,'g'), `this.#${f}(`]);
+
+    // Refs: inputEl -> this.#inputEl (access private ref field)
     for(const ref of rn) reps.push([new RegExp(`(?<!#)\\b${ref}\\b`,'g'), `this.#${ref}`]);
+
+    // Consume: user -> this.#user (access consumed context value)
     for(const co of cons) reps.push([new RegExp(`(?<!#)\\b${co}\\b`,'g'), `this.#${co}`]);
+
     return reps;
   }
+
   const _defaultReplacements = buildReplacements();
 
+  /**
+   * Transform an expression outside of loop context.
+   * Applies all identifier replacements using txSafe().
+   */
   function tx(expr){ return txSafe(expr, _defaultReplacements); }
+  // ─── Helper utility functions ───
+
+  /**
+   * Convert kebab-case tag name to PascalCase class name.
+   * e.g., 'my-component' -> 'MyComponent'
+   */
   function tagToClass(t){return t.split('-').map(p=>p.charAt(0).toUpperCase()+p.slice(1)).join('');}
+
+  /**
+   * Convert camelCase to kebab-case.
+   * e.g., 'myProp' -> 'my-prop'
+   * Used to map JavaScript properties to HTML attributes.
+   */
   function camelToKebab(s){return s.replace(/([A-Z])/g,'-$1').toLowerCase();}
+
+  /**
+   * Minify CSS by removing unnecessary whitespace.
+   * Not for security, just code size reduction.
+   */
   function minCss(css){return css.replace(/\s+/g,' ').replace(/\s*{\s*/g,'{').replace(/\s*}\s*/g,'}').replace(/\s*:\s*/g,':').replace(/\s*;\s*/g,';').trim();}
 
-  // Track event bindings: each gets a unique data-flare-id
-  const eventBindings = []; // { eid, events: [{name, handler, modifiers}], binds: [{value}], inLoop: false, loopCtx: null }
+  /**
+   * Scope CSS selectors for shadow: none mode.
+   *
+   * shadow: none ではShadow DOMによるスタイル隔離がないため、
+   * セレクタにスコープ属性を付与してスタイル衝突を防止する。
+   *
+   * 変換例:
+   *   .card { ... }              → [data-flare-scope="x-card"] .card { ... }
+   *   h2 { ... }                 → [data-flare-scope="x-card"] h2 { ... }
+   *   :host { ... }              → [data-flare-scope="x-card"] { ... }
+   *   :host(.active) { ... }     → [data-flare-scope="x-card"].active { ... }
+   *   .a, .b { ... }             → [data-flare-scope="x-card"] .a, [data-flare-scope="x-card"] .b { ... }
+   *
+   * @param {string} css - 元のCSS
+   * @param {string} tagName - コンポーネントのタグ名（例: "x-card"）
+   * @returns {string} スコープ付きCSS
+   */
+  function scopeCss(css, tagName) {
+    const scope = `[data-flare-scope="${tagName}"]`;
+    // Split CSS into rules (respecting nested braces for @media etc.)
+    const rules = [];
+    let current = '';
+    let depth = 0;
+    for (let i = 0; i < css.length; i++) {
+      const ch = css[i];
+      if (ch === '{') depth++;
+      else if (ch === '}') { depth--; if (depth === 0) { rules.push(current + '}'); current = ''; continue; } }
+      current += ch;
+    }
+    if (current.trim()) rules.push(current);
 
-  function tplStr(nodes,indent,loopCtx){const pad=' '.repeat(indent);let o='';for(const n of nodes){switch(n.kind){case'text':if(n.value.trim())o+=`${pad}${n.value.trim()}\n`;break;case'interpolation':o+=`${pad}\${this.#esc(${loopCtx?txLoop(n.expr,loopCtx):tx(n.expr)})}\n`;break;case'element':o+=elStr(n,indent,loopCtx);break;case'if':o+=ifStr(n,indent,loopCtx);break;case'for':o+=forStr(n,indent,loopCtx);break;}}return o;}
+    return rules.map(rule => {
+      const m = rule.match(/^([^{]+)\{([\s\S]*)\}$/);
+      if (!m) return rule;
+      const selectorPart = m[1].trim();
+      const body = m[2];
 
-  // Transform expression inside a loop context - don't transform loop variables
+      // Handle @media, @keyframes etc. — recurse into the body
+      if (selectorPart.startsWith('@')) {
+        return `${selectorPart} { ${scopeCss(body, tagName)} }`;
+      }
+
+      // Split comma-separated selectors and scope each
+      const selectors = selectorPart.split(',').map(s => s.trim());
+      const scoped = selectors.map(sel => {
+        // :host pseudo-class — maps to the scoped element itself
+        if (sel === ':host') return scope;
+        if (sel.startsWith(':host(') && sel.endsWith(')')) {
+          // :host(.active) → [data-flare-scope="x-card"].active
+          return scope + sel.slice(6, -1);
+        }
+        // Already starts with scope? skip
+        if (sel.startsWith('[data-flare-scope')) return sel;
+        // Normal selector: prepend scope
+        return `${scope} ${sel}`;
+      });
+      return `${scoped.join(', ')} {${body}}`;
+    }).join('\n');
+  }
+
+  /**
+   * Event binding registry.
+   *
+   * Each element with events (@click, @change, :bind) gets a unique data-flare-id
+   * that's used to find and bind event listeners during #render().
+   *
+   * Structure: {
+   *   eid: "fl-0",
+   *   events: [{name: "click", value: "handler", modifiers: [...]}],
+   *   binds: [{value: "state.field"}],
+   *   inLoop: false,
+   *   loopCtx: null
+   * }
+   *
+   * When inLoop=true, eid is dynamic: "fl-0-${index}"
+   */
+  const eventBindings = [];
+
+  /**
+   * Convert template AST nodes to template literal string.
+   *
+   * Recursively generates a template string that can be used in:
+   * tpl.innerHTML = `...generated template...`
+   *
+   * Each node type generates different code:
+   * - text: literal text
+   * - interpolation: ${this.#esc(expr)} with escaping
+   * - element: <tag attr="${value}">...</tag> with dynamic attributes
+   * - if/for: ternary/map expressions
+   *
+   * @param {Array} nodes - Template AST nodes
+   * @param {number} indent - Current indentation level
+   * @param {Object} loopCtx - Loop context (if inside <#for>)
+   * @returns {string} Template literal code
+   */
+  function tplStr(nodes,indent,loopCtx){
+    const pad=' '.repeat(indent);
+    let o='';
+    for(const n of nodes){
+      switch(n.kind){
+        case'text':
+          if(n.value.trim())o+=`${pad}${n.value.trim()}\n`;
+          break;
+        case'interpolation':
+          // Interpolations are always escaped to prevent XSS
+          o+=`${pad}\${this.#esc(${loopCtx?txLoop(n.expr,loopCtx):tx(n.expr)})}\n`;
+          break;
+        case'element':
+          o+=elStr(n,indent,loopCtx);
+          break;
+        case'if':
+          o+=ifStr(n,indent,loopCtx);
+          break;
+        case'for':
+          o+=forStr(n,indent,loopCtx);
+          break;
+      }
+    }
+    return o;
+  }
+
+  /**
+   * Transform expression inside a loop context.
+   *
+   * Same as tx() but excludes loop variables from transformation
+   * so they remain accessible in the loop scope.
+   *
+   * Example: inside <#for each="item"> loop, "item" should NOT
+   * become "this.#item" because it's a loop variable.
+   *
+   * @param {string} expr - Expression to transform
+   * @param {Object} loopCtx - Loop context {each, index, of}
+   * @returns {string} Transformed expression
+   */
   function txLoop(expr, loopCtx) {
     const reps = [];
     for(const s of sv) {
@@ -637,11 +1593,28 @@ function generate(c, options) {
     return txSafe(expr, reps);
   }
 
+  /**
+   * Generate template string for an element node.
+   *
+   * Handles:
+   * - Static attributes: class="value"
+   * - Dynamic attributes: :class="${expr}"
+   * - Directives: :bind (two-way), @event (event binding), ref (DOM reference)
+   * - Special attributes: @html (unescaped), :...spread (spread props)
+   * - Security: href/src sanitization, attribute escaping
+   * - Custom elements: must use closing tag (not self-closing)
+   * - Data attributes: data-flare-id for event binding, data-ref for refs
+   *
+   * @param {Object} n - Element node
+   * @param {number} indent - Indentation level
+   * @param {Object} loopCtx - Loop context (if in <#for>)
+   * @returns {string} Generated template code for element
+   */
   function elStr(n,indent,loopCtx){
     const pad=' '.repeat(indent);
-    // P1-13: Check for missing close tag
+
+    // Check for unclosed elements (parse error)
     if (n._missingCloseTag) {
-      // Mark diagnostic to be emitted later
       missingCloseTagElements.push(n.tag);
     }
     const evAttrs=n.attrs.filter(a=>a.event);
@@ -714,35 +1687,88 @@ function generate(c, options) {
     return`${pad}<${n.tag}${as}>\n${tplStr(n.children,indent+2,loopCtx)}${pad}</${n.tag}>\n`;
   }
 
+  /**
+   * Generate template string for an if/else-if/else block.
+   *
+   * Uses nested ternary operators to generate:
+   * ${condition ? `...content...` : otherCondition ? `...` : `...else...`}
+   *
+   * @param {Object} n - If node
+   * @param {number} indent - Indentation level
+   * @param {Object} loopCtx - Loop context
+   * @returns {string} Generated ternary expression
+   */
   function ifStr(n,indent,loopCtx){
     const pad=' '.repeat(indent);
     const txExpr = loopCtx ? txLoop(n.condition, loopCtx) : tx(n.condition);
     let o=`${pad}\${${txExpr} ? \`\n${tplStr(n.children,indent+2,loopCtx)}`;
-    // else-if chain
+
+    // Handle else-if chain
     if(n.elseIfChain) {
       for(const branch of n.elseIfChain) {
         const branchExpr = loopCtx ? txLoop(branch.condition, loopCtx) : tx(branch.condition);
         o+=`${pad}\` : ${branchExpr} ? \`\n${tplStr(branch.children,indent+2,loopCtx)}`;
       }
     }
+
+    // Final else block
     if(n.elseChildren)o+=`${pad}\` : \`\n${tplStr(n.elseChildren,indent+2,loopCtx)}`;
     o+=`${pad}\` : ''}\n`;
     return o;
   }
 
+  /**
+   * Generate template string for a for-loop block.
+   *
+   * Generates array.map() expression:
+   * ${array.map((item, index) => `...content...`).join('')}
+   *
+   * When emptyChildren provided, uses ternary:
+   * ${array.length > 0 ? array.map(...).join('') : `...empty...`}
+   *
+   * @param {Object} n - For node
+   * @param {number} indent - Indentation level
+   * @param {Object} loopCtx - Outer loop context (if nested)
+   * @returns {string} Generated map expression
+   */
   function forStr(n,indent,loopCtx){
     const pad=' '.repeat(indent);
-    const le=tx(n.of);
-    const idxVar = n.index || '__idx';
+    const le=tx(n.of);  // Array expression
+    const idxVar = n.index || '__idx';  // Index variable (default: __idx)
     const forLoopCtx = { each: n.each, index: idxVar, of: n.of };
 
     if(n.emptyChildren) {
+      // Ternary: length > 0 ? map(...) : emptyContent
       return`${pad}\${${le}.length > 0 ? ${le}.map((${n.each}, ${idxVar}) => \`\n${tplStr(n.children,indent+2,forLoopCtx)}${pad}\`).join('') : \`\n${tplStr(n.emptyChildren,indent+2,loopCtx)}${pad}\`}\n`;
     }
+
+    // Direct map without empty check
     return`${pad}\${${le}.map((${n.each}, ${idxVar}) => \`\n${tplStr(n.children,indent+2,forLoopCtx)}${pad}\`).join('')}\n`;
   }
 
-  // Build event binding code using data-flare-id
+  /**
+   * Generate event binding code for #bindEvents() method.
+   *
+   * Creates querySelector/querySelectorAll calls to find elements by data-flare-id
+   * and attach event listeners.
+   *
+   * Two modes:
+   * 1. Static bindings: querySelector('[data-flare-id="fl-0"]')
+   * 2. Loop bindings: querySelectorAll('[data-flare-id^="fl-0-"]') with index extraction
+   *
+   * For each event, generates:
+   * - Handler wrapper with event modifiers (prevent, stop, enter, esc)
+   * - addEventListener() call
+   * - Cleanup registration in this.#listeners
+   *
+   * @param {string} root - Root element ('this.#shadow' or 'this')
+   * @returns {string} Generated event binding code
+   * @description
+   * イベント結合システムは data-flare-id を使用して:
+   * - テンプレート内のイベントハンドラーを要素に結び付ける
+   * - ループ内でも動的 ID でハンドラーを正しく結び付ける
+   * - アンマウント時にリッスナーを自動的にクリーンアップする
+   */
   function buildEvtCode(root) {
     let code = '';
     for (const binding of eventBindings) {
@@ -897,6 +1923,10 @@ function generate(c, options) {
   if(pv.length){o+=`  static get observedAttributes() {\n    return [${pv.map(p=>`'${camelToKebab(p)}'`).join(', ')}];\n  }\n\n`;}
   o+=`  constructor() {\n    super();\n`;if(us)o+=`    this.#shadow = this.attachShadow({ mode: '${sh}' });\n`;o+=`  }\n\n`;
   o+=`  connectedCallback() {\n`;
+  // shadow: none mode: add scoping attribute for CSS isolation
+  if (!us) {
+    o+=`    this.setAttribute('data-flare-scope', '${tn}');\n`;
+  }
   // Read initial prop values from HTML attributes
   for(const d of c.script) {
     if(d.kind==='prop') {
@@ -970,7 +2000,16 @@ function generate(c, options) {
   o+=`  #render() {\n`;
   o+=`    const tpl = document.createElement('template');\n`;
   o+=`    tpl.innerHTML = \`\n`;
-  if(c.style)o+=`      <style>${minCss(c.style)}</style>\n`;
+  if(c.style) {
+    if (us) {
+      // Shadow DOM mode: styles are naturally scoped, just minify
+      o+=`      <style>${minCss(c.style)}</style>\n`;
+    } else {
+      // shadow: none mode: apply CSS scoping to prevent style leaking
+      // Selectors are prefixed with [data-flare-scope="tag-name"]
+      o+=`      <style>${minCss(scopeCss(c.style, tn))}</style>\n`;
+    }
+  }
   o+=templateStr;
   o+=`    \`;\n`;
   o+=`    ${root}.replaceChildren(tpl.content.cloneNode(true));\n`;
@@ -1073,23 +2112,116 @@ function generate(c, options) {
   return o;
 }
 
-// ─── Public API ───
+// ============================================================
+// PUBLIC API
+// ============================================================
+
+/**
+ * Main compiler entry point.
+ *
+ * Orchestrates the 5-phase compilation pipeline:
+ * 1. Split: Extract blocks
+ * 2. Parse: Parse meta, script, template, style
+ * 3. Check: Type checking and diagnostics
+ * 4. Generate: Code generation
+ * 5. Output: Return compiled code or .d.ts
+ *
+ * @param {string} source - Raw .flare file content
+ * @param {string} fileName - Source file name (for default component name)
+ * @param {Object} [options] - Compiler options {target: 'ts'|'js'}
+ * @returns {Object} Compilation result:
+ *   - success: boolean
+ *   - output: Generated JavaScript code (if successful)
+ *   - dtsOutput: Generated TypeScript .d.ts (if target='ts')
+ *   - diagnostics: Array of error/warning diagnostics
+ *   - ast: Component AST (useful for analysis)
+ *
+ * @example
+ * const result = compile(sourceCode, 'my-button.flare', {target: 'ts'});
+ * if (result.success) {
+ *   fs.writeFileSync('my-button.js', result.output);
+ *   fs.writeFileSync('my-button.d.ts', result.dtsOutput);
+ * } else {
+ *   result.diagnostics.forEach(d => console.error(d.message));
+ * }
+ *
+ * @description
+ * このコンパイラは .flare ファイルを Web Components に変換します。
+ * エラーが発生した場合は success=false が返され、diagnostics に詳細が含まれます。
+ */
 function compile(source, fileName, options) {
+  // Phase 1: Split blocks
   const blocks = splitBlocks(source);
   if (!blocks.some(b => b.type === 'template'))
-    return { success:false, diagnostics:[{level:'error',code:'E0002',message:'<template> ブロックが見つかりません'}] };
-  let meta={},script=[],template=[],style='';
-  for(const b of blocks){switch(b.type){case'meta':meta=parseMeta(b.content);break;case'script':script=parseScript(b.content,b.startLine);break;case'template':template=parseTemplateNodes(b.content.trim());break;case'style':style=b.content.trim();break;}}
-  if(!meta.name)meta.name='x-'+fileName.replace(/\.flare$/,'').replace(/([A-Z])/g,'-$1').toLowerCase();
+    return {
+      success:false,
+      diagnostics:[{
+        level:'error',
+        code:'E0002',
+        message:'<template> ブロックが見つかりません'
+      }]
+    };
+
+  // Phase 2: Parse
+  let meta={}, script=[], template=[], style='';
+  for(const b of blocks){
+    switch(b.type){
+      case'meta': meta=parseMeta(b.content); break;
+      case'script': script=parseScript(b.content,b.startLine); break;
+      case'template': template=parseTemplateNodes(b.content.trim()); break;
+      case'style': style=b.content.trim(); break;
+    }
+  }
+
+  // Auto-generate component name from filename if not specified
+  if(!meta.name) {
+    meta.name='x-'+fileName.replace(/\.flare$/,'').replace(/([A-Z])/g,'-$1').toLowerCase();
+  }
+
+  // Build AST
   const ast={meta,script,template,style,fileName};
-  const checker=new TypeChecker(ast);const diagnostics=checker.check();
-  // P1-18: Warn if extends is specified (not yet supported)
-  if(meta.extends)diagnostics.push({level:'warning',code:'W0205',message:'extends はまだサポートされていません'});
-  if(diagnostics.some(d=>d.level==='error'))return{success:false,diagnostics,ast};
+
+  // Phase 3: Type check
+  const checker=new TypeChecker(ast);
+  const diagnostics=checker.check();
+
+  // Warn if unsupported features are used
+  if(meta.extends) {
+    diagnostics.push({
+      level:'warning',
+      code:'W0205',
+      message:'extends はまだサポートされていません'
+    });
+  }
+
+  // Fail on any error
+  if(diagnostics.some(d=>d.level==='error')) {
+    return{success:false,diagnostics,ast};
+  }
+
+  // Phase 4: Code generation
   const output=generate(ast, options);
-  // P1-20: Generate .d.ts when target is 'ts'
+
+  // Phase 5: Optional .d.ts generation
   const dtsOutput=options?.target==='ts'?generateDts(ast):undefined;
-  return{success:true,output,dtsOutput,diagnostics,ast};
+
+  return{
+    success:true,
+    output,
+    dtsOutput,
+    diagnostics,
+    ast
+  };
 }
 
-module.exports = { compile, splitBlocks, parseTemplateNodes, TypeChecker, generate };
+// ============================================================
+// Module Exports
+// ============================================================
+
+module.exports = {
+  compile,              // Main API entry point
+  splitBlocks,          // For testing/debugging
+  parseTemplateNodes,   // For testing template parsing
+  TypeChecker,          // For testing type checking
+  generate              // For testing code generation
+};

@@ -41,16 +41,26 @@ Write `.flare` files with a simple, declarative syntax — get zero-runtime Cust
 ## Quick start
 
 ```bash
-# 1. Download flare-cli and enter the directory
-cd flare-cli
+# 1. Clone and enter the repository
+git clone <repo-url> && cd flare
 
 # 2. Create a new project
-node bin/flare.js init my-app
-
-# 3. Build and run
+node flare-cli/bin/flare.js init my-app
 cd my-app
-node ../bin/flare.js dev
+
+# 3. Build
+node ../flare-cli/bin/flare.js build
+
+# 4. Start dev server (live reload)
+node ../flare-cli/bin/flare.js dev
 # → Open http://localhost:3000
+```
+
+Or from an existing project with `flare.config.json`:
+
+```bash
+node flare-cli/bin/flare.js build    # Production build
+node flare-cli/bin/flare.js check    # Type check only
 ```
 
 ## Language overview
@@ -183,8 +193,13 @@ Features:
 
 ## Roadmap
 
+- [x] TypeScript output (`--target ts` with `.d.ts` generation)
+- [x] Scoped CSS for `shadow: none` mode
+- [x] Comprehensive test suite (102 tests)
+- [x] XSS protection (auto-escape for text, attributes, and URLs)
+- [x] Rust compiler implementation (experimental, in `flare-compiler-rust/`)
 - [ ] Language Server Protocol (LSP) for full TypeScript type checking inside `fn`
-- [ ] Rust compiler implementation (source available in `flare-compiler-rust/`)
+- [ ] Diff-based DOM rendering (currently full re-render)
 - [ ] HMR (Hot Module Replacement) in dev server
 - [ ] SSR (Server-Side Rendering) support
 - [ ] npm package publishing
