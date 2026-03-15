@@ -21,12 +21,12 @@ jobs:
           node -c flare-cli/lib/compiler.js
           node -c flare-cli/bin/flare.js
           node -c flare-vscode/extension.js
-      - name: Run tests
-        run: node test-bugs.js
+      - name: Run compiler tests
+        run: node --test flare-cli/test/compiler.test.js
+      - name: Run CLI tests
+        run: node --test flare-cli/test/cli.test.js
       - name: Build examples
-        run: |
-          cd examples
-          node ../flare-cli/bin/flare.js build
+        run: node flare-cli/bin/flare.js build examples/src/components
 
   rust:
     runs-on: ubuntu-latest

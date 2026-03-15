@@ -549,8 +549,8 @@ function runDiagnostics(document) {
     /**
      * JSDocコメント抽出ヘルパー
      *
-     * 指定行の直前にある JSDoc コメント（/** ... */）を抽出します。
-     * 単一行（/** text */）と複数行（/** ... * ... */）の両形式に対応。
+     * 指定行の直前にある JSDoc コメントを抽出します。
+     * 単一行と複数行の両形式に対応。
      *
      * @param {number} lineIndex - コメント対象の行インデックス（lines配列内）
      * @returns {string} 抽出されたJSDocテキスト（複数行の場合は\nで結合）
