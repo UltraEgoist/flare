@@ -143,6 +143,14 @@ function parseScript(content, startLine) {
       decls.push({ kind:'watch', deps, body:body.trim(), span:{line:ln} });
       continue;
     }
+    if ((m = line.match(/^provide\s+(\w+)\s*:\s*([^=]+)\s*=\s*(.+)$/))) {
+      decls.push({ kind:'provide', name:m[1], type:parseType(m[2].trim()), init:m[3].trim(), span:{line:ln} });
+      i++; continue;
+    }
+    if ((m = line.match(/^consume\s+(\w+)\s*:\s*(.+)$/))) {
+      decls.push({ kind:'consume', name:m[1], type:parseType(m[2].trim()), span:{line:ln} });
+      i++; continue;
+    }
     i++;
   }
   return decls;
@@ -203,10 +211,45 @@ function parseIfBlock(html,pos){
   const om=html.substring(pos).match(/<#if\s+condition="([^"]+)">/);
   if(!om)throw new Error('Invalid #if');
   const cond=om[1],sp=pos+om[0].length,cp=findMatchingClose(html,sp,'#if');
-  let inner=html.substring(sp,cp),elseChildren;
-  const em=inner.match(/<:else>/);
-  if(em&&em.index!==undefined){elseChildren=parseTemplateNodes(inner.substring(em.index+em[0].length));inner=inner.substring(0,em.index);}
-  return{node:{kind:'if',condition:cond,children:parseTemplateNodes(inner),elseChildren},end:cp+'</#if>'.length};
+  let inner=html.substring(sp,cp),elseChildren,elseIfChain=[];
+
+  // Parse :else-if and :else branches
+  let remaining = inner;
+  const mainEndRe = /<:else-if\s+condition="([^"]+)">|<:else>/;
+  const mainMatch = remaining.match(mainEndRe);
+  if (mainMatch && mainMatch.index !== undefined) {
+    const mainContent = remaining.substring(0, mainMatch.index);
+    remaining = remaining.substring(mainMatch.index);
+
+    // Parse chain of :else-if and final :else
+    while (remaining.length > 0) {
+      const eifm = remaining.match(/^<:else-if\s+condition="([^"]+)">/);
+      if (eifm) {
+        remaining = remaining.substring(eifm[0].length);
+        const nextBranch = remaining.match(/<:else-if\s+condition="([^"]+)">|<:else>/);
+        let branchContent;
+        if (nextBranch && nextBranch.index !== undefined) {
+          branchContent = remaining.substring(0, nextBranch.index);
+          remaining = remaining.substring(nextBranch.index);
+        } else {
+          branchContent = remaining;
+          remaining = '';
+        }
+        elseIfChain.push({ condition: eifm[1], children: parseTemplateNodes(branchContent.trim()) });
+        continue;
+      }
+      const elsem = remaining.match(/^<:else>/);
+      if (elsem) {
+        elseChildren = parseTemplateNodes(remaining.substring(elsem[0].length).trim());
+        break;
+      }
+      break;
+    }
+    inner = mainContent;
+  }
+
+  const node = { kind:'if', condition:cond, children:parseTemplateNodes(inner.trim()), elseIfChain: elseIfChain.length > 0 ? elseIfChain : undefined, elseChildren };
+  return{node, end:cp+'</#if>'.length};
 }
 function parseForBlock(html,pos){
   // Support attributes in any order: each, of, key
@@ -230,7 +273,7 @@ function parseForBlock(html,pos){
 class TypeChecker {
   constructor(component){this.c=component;this.symbols=new Map();this.diags=[];this.typeAliases=new Map();}
   check(){this.buildSymbols();this.checkScript();this.checkTemplate(this.c.template);this.checkUnused();return this.diags;}
-  buildSymbols(){for(const d of this.c.script){switch(d.kind){case'state':this.symbols.set(d.name,{type:d.type,source:'state'});break;case'prop':this.symbols.set(d.name,{type:d.type,source:'prop'});break;case'computed':this.symbols.set(d.name,{type:d.type,source:'computed'});break;case'fn':this.symbols.set(d.name,{type:d.returnType||{kind:'primitive',name:'void'},source:'fn'});break;case'emit':this.symbols.set(d.name,{type:d.type,source:'emit'});break;case'ref':this.symbols.set(d.name,{type:d.type,source:'ref'});break;case'type':this.typeAliases.set(d.name,d.type);break;}}}
+  buildSymbols(){for(const d of this.c.script){switch(d.kind){case'state':this.symbols.set(d.name,{type:d.type,source:'state'});break;case'prop':this.symbols.set(d.name,{type:d.type,source:'prop'});break;case'computed':this.symbols.set(d.name,{type:d.type,source:'computed'});break;case'fn':this.symbols.set(d.name,{type:d.returnType||{kind:'primitive',name:'void'},source:'fn'});break;case'emit':this.symbols.set(d.name,{type:d.type,source:'emit'});break;case'ref':this.symbols.set(d.name,{type:d.type,source:'ref'});break;case'provide':this.symbols.set(d.name,{type:d.type,source:'provide'});break;case'consume':this.symbols.set(d.name,{type:d.type,source:'consume'});break;case'type':this.typeAliases.set(d.name,d.type);break;}}}
   checkScript(){for(const d of this.c.script)if(d.kind==='state'){const t=this.infer(d.init);if(t&&!this.assignable(t,d.type))this.diags.push({level:'error',code:'E0201',message:`state '${d.name}' の初期値の型が一致しません`,span:d.span});}}
   checkTemplate(nodes){for(const n of nodes){if(n.kind==='interpolation')this.checkInterp(n);else if(n.kind==='element'){n.attrs.forEach(a=>{
     if(a.dynamic||a.bind)this.checkVars(a.value);
@@ -238,14 +281,14 @@ class TypeChecker {
     if(a.html)this.diags.push({level:'warning',code:'W0201',message:`@html はエスケープされません。XSSリスクがあるため、信頼できるデータのみ使用してください`});
     // Security: warn about dynamic href/src (potential javascript: URL injection)
     if(a.dynamic&&(a.name==='href'||a.name==='src'))this.diags.push({level:'warning',code:'W0202',message:`動的な :${a.name} は javascript: URL インジェクションのリスクがあります。入力を検証してください`});
-  });this.checkTemplate(n.children);}else if(n.kind==='if'){this.checkVars(n.condition);this.checkTemplate(n.children);if(n.elseChildren)this.checkTemplate(n.elseChildren);}else if(n.kind==='for'){this.checkVars(n.of);this.symbols.set(n.each,{type:{kind:'primitive',name:'string'},source:'loop'});if(n.index)this.symbols.set(n.index,{type:{kind:'primitive',name:'number'},source:'loop'});this.checkTemplate(n.children);if(n.emptyChildren)this.checkTemplate(n.emptyChildren);this.symbols.delete(n.each);if(n.index)this.symbols.delete(n.index);}}}
+  });this.checkTemplate(n.children);}else if(n.kind==='if'){this.checkVars(n.condition);this.checkTemplate(n.children);if(n.elseIfChain)for(const branch of n.elseIfChain){this.checkVars(branch.condition);this.checkTemplate(branch.children);}if(n.elseChildren)this.checkTemplate(n.elseChildren);}else if(n.kind==='for'){this.checkVars(n.of);this.symbols.set(n.each,{type:{kind:'primitive',name:'string'},source:'loop'});if(n.index)this.symbols.set(n.index,{type:{kind:'primitive',name:'number'},source:'loop'});this.checkTemplate(n.children);if(n.emptyChildren)this.checkTemplate(n.emptyChildren);this.symbols.delete(n.each);if(n.index)this.symbols.delete(n.index);}}}
   checkInterp(n){const m=n.expr.match(/^(\w+)\.(\w+)\(/);if(m){const sym=this.symbols.get(m[1]);if(sym&&sym.type.kind==='primitive'){const strM=['toUpperCase','toLowerCase','trim','split','replace','includes','startsWith','endsWith','indexOf','slice'];if(sym.type.name==='number'&&strM.includes(m[2]))this.diags.push({level:'error',code:'E0302',message:`'${m[1]}' は 'number' 型ですが、'${m[2]}' メソッドはありません`,hint:`String(${m[1]}) に変換してください`});}}this.checkVars(n.expr);}
   checkVars(expr){const reserved=new Set(['true','false','null','undefined','void','typeof','instanceof','new','return','if','else','for','while','const','let','var','function','class','this','super','import','export','from','await','async','try','catch','finally','throw','length','map','filter','reduce','push','pop','trim','includes','indexOf','slice','splice','concat','join','split','toFixed','toString','toUpperCase','toLowerCase','replace','match','startsWith','endsWith','parseInt','parseFloat','String','Number','Boolean','Array','Object','Math','JSON','console','window','document','fetch','Promise','Date','Error','event','e','r','s','i','t','n','ok','data','error','index']);
     // Strip string literals before extracting identifiers
     const stripped=expr.replace(/"(?:[^"\\]|\\.)*"/g,' ').replace(/'(?:[^'\\]|\\.)*'/g,' ').replace(/`(?:[^`\\]|\\.)*`/g,' ');
     const ids=stripped.match(/\b[a-zA-Z_]\w*\b/g)||[];for(const id of ids){if(reserved.has(id)||this.typeAliases.has(id))continue;if(!this.symbols.has(id)){const sug=this.similar(id);this.diags.push({level:'error',code:'E0301',message:`未定義の識別子 '${id}'`,hint:sug?`'${sug}' のことですか？`:undefined});}}}
   checkUnused(){const used=new Set();this.collectRefs(this.c.template,used);for(const d of this.c.script){if(d.kind==='computed')(d.expr.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='fn')(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='watch'){d.deps.forEach(dep=>used.add(dep));(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));}}for(const[name,sym]of this.symbols)if(sym.source==='state'&&!used.has(name))this.diags.push({level:'warning',code:'W0101',message:`state '${name}' が宣言されましたが使用されていません`});}
-  collectRefs(nodes,refs){for(const n of nodes){if(n.kind==='interpolation')(n.expr.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));else if(n.kind==='element'){n.attrs.forEach(a=>{if(a.dynamic||a.event||a.bind)(a.value.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));});this.collectRefs(n.children,refs);}else if(n.kind==='if'){(n.condition.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.elseChildren)this.collectRefs(n.elseChildren,refs);}else if(n.kind==='for'){(n.of.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.emptyChildren)this.collectRefs(n.emptyChildren,refs);}}}
+  collectRefs(nodes,refs){for(const n of nodes){if(n.kind==='interpolation')(n.expr.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));else if(n.kind==='element'){n.attrs.forEach(a=>{if(a.dynamic||a.event||a.bind)(a.value.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));});this.collectRefs(n.children,refs);}else if(n.kind==='if'){(n.condition.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.elseIfChain)for(const branch of n.elseIfChain){(branch.condition.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(branch.children,refs);}if(n.elseChildren)this.collectRefs(n.elseChildren,refs);}else if(n.kind==='for'){(n.of.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.emptyChildren)this.collectRefs(n.emptyChildren,refs);}}}
   infer(e){e=e.trim();if(/^-?\d+(\.\d+)?$/.test(e))return{kind:'primitive',name:'number'};if(/^["'`]/.test(e))return{kind:'primitive',name:'string'};if(e==='true'||e==='false')return{kind:'primitive',name:'boolean'};if(e==='null')return{kind:'primitive',name:'null'};if(e.startsWith('['))return{kind:'array',element:{kind:'primitive',name:'string'}};const sym=this.symbols.get(e);return sym?sym.type:null;}
   assignable(from,to){if(from.kind===to.kind&&from.kind==='primitive')return from.name===to.name;if(from.kind==='array'&&to.kind==='array')return true;return true;}
   similar(name){let best=null,bd=Infinity;for(const[k]of this.symbols){const d=lev(name,k);if(d<bd&&d<=2){bd=d;best=k;}}return best;}
@@ -254,8 +297,8 @@ function lev(a,b){const m=a.length,n=b.length,dp=Array.from({length:m+1},()=>Arr
 
 // ─── Phase 5: Code Generator ───
 function generate(c) {
-  const sv=[],pv=[],cv=[],en=[],rn=[],fn=[];
-  for(const d of c.script){switch(d.kind){case'state':sv.push(d.name);break;case'prop':pv.push(d.name);break;case'computed':cv.push(d.name);break;case'emit':en.push(d.name);break;case'ref':rn.push(d.name);break;case'fn':fn.push(d.name);break;}}
+  const sv=[],pv=[],cv=[],en=[],rn=[],fn=[],prov=[],cons=[];
+  for(const d of c.script){switch(d.kind){case'state':sv.push(d.name);break;case'prop':pv.push(d.name);break;case'computed':cv.push(d.name);break;case'emit':en.push(d.name);break;case'ref':rn.push(d.name);break;case'fn':fn.push(d.name);break;case'provide':prov.push(d.name);sv.push(d.name);break;case'consume':cons.push(d.name);break;}}
 
   let _eid = 0;
   function nextEid() { return `fl-${_eid++}`; }
@@ -315,6 +358,7 @@ function generate(c) {
     for(const e of en) reps.push([new RegExp(`\\b${e}\\(`,'g'), `this.#emit_${e}(`]);
     for(const f of fn) reps.push([new RegExp(`\\b${f}\\(`,'g'), `this.#${f}(`]);
     for(const ref of rn) reps.push([new RegExp(`\\b${ref}\\b`,'g'), `this.#${ref}`]);
+    for(const co of cons) reps.push([new RegExp(`\\b${co}\\b`,'g'), `this.#${co}`]);
     return reps;
   }
   const _defaultReplacements = buildReplacements();
@@ -420,6 +464,13 @@ function generate(c) {
     const pad=' '.repeat(indent);
     const txExpr = loopCtx ? txLoop(n.condition, loopCtx) : tx(n.condition);
     let o=`${pad}\${${txExpr} ? \`\n${tplStr(n.children,indent+2,loopCtx)}`;
+    // else-if chain
+    if(n.elseIfChain) {
+      for(const branch of n.elseIfChain) {
+        const branchExpr = loopCtx ? txLoop(branch.condition, loopCtx) : tx(branch.condition);
+        o+=`${pad}\` : ${branchExpr} ? \`\n${tplStr(branch.children,indent+2,loopCtx)}`;
+      }
+    }
     if(n.elseChildren)o+=`${pad}\` : \`\n${tplStr(n.elseChildren,indent+2,loopCtx)}`;
     o+=`${pad}\` : ''}\n`;
     return o;
@@ -555,11 +606,38 @@ function generate(c) {
   let o = `(() => {\n"use strict";\n\n`;
   o += `class ${cn} extends HTMLElement {\n`;
   for(const d of c.script)if(d.kind==='state')o+=`  #${d.name} = ${d.init};\n`;
+  for(const d of c.script)if(d.kind==='provide')o+=`  #${d.name} = ${d.init};\n`;
+  for(const d of c.script)if(d.kind==='consume')o+=`  #${d.name} = undefined;\n`;
   for(const d of c.script)if(d.kind==='ref')o+=`  #${d.name} = null;\n`;
   if(us)o+=`  #shadow;\n`;o+=`  #listeners = [];\n\n`;
   if(pv.length){o+=`  static get observedAttributes() {\n    return [${pv.map(p=>`'${camelToKebab(p)}'`).join(', ')}];\n  }\n\n`;}
   o+=`  constructor() {\n    super();\n`;if(us)o+=`    this.#shadow = this.attachShadow({ mode: '${sh}' });\n`;o+=`  }\n\n`;
-  o+=`  connectedCallback() {\n    this.#render();\n    this.#bindEvents();\n`;for(const d of c.script)if(d.kind==='lifecycle'&&d.event==='mount')o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;o+=`  }\n\n`;
+  o+=`  connectedCallback() {\n`;
+  // Read initial prop values from HTML attributes
+  for(const d of c.script) {
+    if(d.kind==='prop') {
+      const kebab=camelToKebab(d.name);
+      const coerce = d.type.name==='number'?`parseFloat(v) || 0`:d.type.name==='boolean'?`v !== null && v !== 'false'`:`v || ${d.default||"''"}`;
+      o+=`    { const v = this.getAttribute('${kebab}'); if (v !== null) this.#prop_${d.name} = ${coerce}; }\n`;
+    }
+  }
+  // provide: listen for context requests from descendants
+  for(const d of c.script) {
+    if(d.kind==='provide') {
+      o+=`    this.addEventListener('__flare_ctx_${d.name}', (e) => { e.stopPropagation(); e.detail.value = this.#${d.name}; e.detail.provider = this; });\n`;
+    }
+  }
+  // consume: dispatch event to find nearest ancestor provider
+  for(const d of c.script) {
+    if(d.kind==='consume') {
+      o+=`    { const detail = { value: undefined, provider: null };\n`;
+      o+=`      this.dispatchEvent(new CustomEvent('__flare_ctx_${d.name}', { detail, bubbles: true, composed: true }));\n`;
+      o+=`      if (detail.provider) this.#${d.name} = detail.value; }\n`;
+    }
+  }
+  o+=`    this.#render();\n    this.#bindEvents();\n    this.#bindRefs();\n`;
+  for(const d of c.script)if(d.kind==='lifecycle'&&d.event==='mount')o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;
+  o+=`  }\n\n`;
   o+=`  disconnectedCallback() {\n    this.#listeners.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));\n    this.#listeners = [];\n`;for(const d of c.script)if(d.kind==='lifecycle'&&d.event==='unmount')o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;o+=`  }\n\n`;
   // adoptedCallback
   const adoptHooks = c.script.filter(d => d.kind==='lifecycle' && d.event==='adopt');
@@ -614,6 +692,15 @@ function generate(c) {
   o+=buildEvtCode(root);
   o+=`  }\n\n`;
 
+  // #bindRefs - bind ref declarations to DOM elements via data-ref
+  o+=`  #bindRefs() {\n`;
+  for(const d of c.script) {
+    if(d.kind==='ref') {
+      o+=`    this.#${d.name} = ${root}.querySelector('[data-ref="${d.name}"]');\n`;
+    }
+  }
+  o+=`  }\n\n`;
+
   // #update - full re-render
   o+=`  #update() {\n`;
   o+=`    this.#listeners.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));\n`;
@@ -627,6 +714,7 @@ function generate(c) {
   }
   o+=`    this.#render();\n`;
   o+=`    this.#bindEvents();\n`;
+  o+=`    this.#bindRefs();\n`;
   for(const d of c.script) {
     if (d.kind==='watch') {
       const depsKey = d.deps.join('_');
