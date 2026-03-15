@@ -54,6 +54,7 @@ const HOVER = {
   'import': '**import** — インポート\n\n他のFlareコンポーネントやTS/JSモジュールを読み込みます。\n\n```flare\nimport XButton from "./button.flare"\nimport { formatDate } from "./utils.ts"\n```\n\nバンドル内ではタグ名で自動参照されるため、import文は省略可能ですが、\n将来のコンパイル時型チェックのために記述を推奨します。',
   'type': '**type** — 型エイリアス\n\nTypeScript互換の型定義です。\n\n```flare\ntype User = { name: string, age: number, email?: string }\ntype Status = "idle" | "loading" | "error"\ntype Result<T> = { ok: true, data: T } | { ok: false, error: string }\n```',
   'async': '**async** — 非同期関数\n\n`fn async` で非同期関数を定義します。\n\n```flare\nfn async fetchUser(id: string) {\n  user = await fetch(`/api/users/${id}`).then(r => r.json())\n}\n```',
+  ':else-if': '**:else-if** — else-if 分岐\n\n`#if` ブロック内で追加の条件分岐を指定します。\n\n```flare\n<#if condition="status === \'ok\'">\n  <p>成功</p>\n<:else-if condition="status === \'loading\'">\n  <p>読み込み中...</p>\n<:else>\n  <p>エラー</p>\n</#if>\n```',
 
   // ── Template directives ──
   '#if': '**#if** — 条件分岐\n\n```flare\n<#if condition="user != null">\n  <p>{{ user.name }}</p>\n<:else-if condition="isLoading">\n  <p>読み込み中...</p>\n<:else>\n  <p>ログインしてください</p>\n</#if>\n```\n\n必須: `condition` 属性',
@@ -144,7 +145,7 @@ function provideHover(document, position) {
   if (syms && syms.has(word)) {
     const sym = syms.get(word);
     let md = '';
-    const sourceLabel = { state: 'state', prop: 'prop', computed: 'computed', fn: 'fn', emit: 'emit', ref: 'ref' };
+    const sourceLabel = { state: 'state', prop: 'prop', computed: 'computed', fn: 'fn', emit: 'emit', ref: 'ref', provide: 'provide', consume: 'consume' };
     const kind = sourceLabel[sym.source] || sym.source;
 
     // Signature line
