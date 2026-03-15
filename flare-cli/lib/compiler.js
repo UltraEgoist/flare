@@ -295,8 +295,25 @@ class TypeChecker {
 }
 function lev(a,b){const m=a.length,n=b.length,dp=Array.from({length:m+1},()=>Array(n+1).fill(0));for(let i=0;i<=m;i++)dp[i][0]=i;for(let j=0;j<=n;j++)dp[0][j]=j;for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)dp[i][j]=Math.min(dp[i-1][j]+1,dp[i][j-1]+1,dp[i-1][j-1]+(a[i-1]===b[j-1]?0:1));return dp[m][n];}
 
+// ─── Type to TypeScript string ───
+function typeToTs(t) {
+  if (!t) return 'any';
+  switch (t.kind) {
+    case 'primitive': return t.name;
+    case 'array': return `${typeToTs(t.element)}[]`;
+    case 'union': return t.types.map(typeToTs).join(' | ');
+    case 'literal': return `"${t.value}"`;
+    case 'object': {
+      const fields = t.fields.map(f => `${f.name}${f.optional ? '?' : ''}: ${typeToTs(f.type)}`);
+      return `{ ${fields.join('; ')} }`;
+    }
+    default: return 'any';
+  }
+}
+
 // ─── Phase 5: Code Generator ───
-function generate(c) {
+function generate(c, options) {
+  const ts = options?.target === 'ts';
   const sv=[],pv=[],cv=[],en=[],rn=[],fn=[],prov=[],cons=[];
   for(const d of c.script){switch(d.kind){case'state':sv.push(d.name);break;case'prop':pv.push(d.name);break;case'computed':cv.push(d.name);break;case'emit':en.push(d.name);break;case'ref':rn.push(d.name);break;case'fn':fn.push(d.name);break;case'provide':prov.push(d.name);sv.push(d.name);break;case'consume':cons.push(d.name);break;}}
 
@@ -605,11 +622,11 @@ function generate(c) {
   // Now generate the class wrapped in IIFE
   let o = `(() => {\n"use strict";\n\n`;
   o += `class ${cn} extends HTMLElement {\n`;
-  for(const d of c.script)if(d.kind==='state')o+=`  #${d.name} = ${d.init};\n`;
-  for(const d of c.script)if(d.kind==='provide')o+=`  #${d.name} = ${d.init};\n`;
-  for(const d of c.script)if(d.kind==='consume')o+=`  #${d.name} = undefined;\n`;
-  for(const d of c.script)if(d.kind==='ref')o+=`  #${d.name} = null;\n`;
-  if(us)o+=`  #shadow;\n`;o+=`  #listeners = [];\n\n`;
+  for(const d of c.script)if(d.kind==='state')o+=`  #${d.name}${ts?': '+typeToTs(d.type):''} = ${d.init};\n`;
+  for(const d of c.script)if(d.kind==='provide')o+=`  #${d.name}${ts?': '+typeToTs(d.type):''} = ${d.init};\n`;
+  for(const d of c.script)if(d.kind==='consume')o+=`  #${d.name}${ts?': '+typeToTs(d.type)+' | undefined':''} = undefined;\n`;
+  for(const d of c.script)if(d.kind==='ref')o+=`  #${d.name}${ts?': '+typeToTs(d.type)+' | null':''} = null;\n`;
+  if(us)o+=`  #shadow${ts?': ShadowRoot':''};\n`;o+=`  #listeners${ts?': [Element, string, EventListener][]':''} = [];\n\n`;
   if(pv.length){o+=`  static get observedAttributes() {\n    return [${pv.map(p=>`'${camelToKebab(p)}'`).join(', ')}];\n  }\n\n`;}
   o+=`  constructor() {\n    super();\n`;if(us)o+=`    this.#shadow = this.attachShadow({ mode: '${sh}' });\n`;o+=`  }\n\n`;
   o+=`  connectedCallback() {\n`;
@@ -658,10 +675,10 @@ function generate(c) {
     o+=`  }\n\n`;
   }
 
-  for(const d of c.script)if(d.kind==='prop'){const def=d.default||(d.type.name==='number'?'0':d.type.name==='boolean'?'false':"''");o+=`  #prop_${d.name} = ${def};\n  get ${d.name}() { return this.#prop_${d.name}; }\n\n`;}
-  for(const d of c.script)if(d.kind==='computed')o+=`  get #${d.name}() { return ${tx(d.expr)}; }\n\n`;
-  for(const d of c.script)if(d.kind==='emit'){const opts=d.options||{bubbles:true,composed:true};o+=`  #emit_${d.name}(detail) {\n    this.dispatchEvent(new CustomEvent('${d.name}', { detail, bubbles: ${opts.bubbles}, composed: ${opts.composed} }));\n  }\n\n`;}
-  for(const d of c.script)if(d.kind==='fn'){const ak=d.async?'async ':'',ps=d.params.map(p=>p.name).join(', ');o+=`  ${ak}#${d.name}(${ps}) {\n    ${tx(d.body).split('\n').join('\n    ')}\n  }\n\n`;}
+  for(const d of c.script)if(d.kind==='prop'){const def=d.default||(d.type.name==='number'?'0':d.type.name==='boolean'?'false':"''");const tsType=ts?': '+typeToTs(d.type):'';o+=`  #prop_${d.name}${tsType} = ${def};\n  get ${d.name}()${tsType} { return this.#prop_${d.name}; }\n\n`;}
+  for(const d of c.script)if(d.kind==='computed'){const tsType=ts?': '+typeToTs(d.type):'';o+=`  get #${d.name}()${tsType} { return ${tx(d.expr)}; }\n\n`;}
+  for(const d of c.script)if(d.kind==='emit'){const opts=d.options||{bubbles:true,composed:true};const detailType=ts?': '+typeToTs(d.type):'';o+=`  #emit_${d.name}(detail${detailType})${ts?': void':''} {\n    this.dispatchEvent(new CustomEvent('${d.name}', { detail, bubbles: ${opts.bubbles}, composed: ${opts.composed} }));\n  }\n\n`;}
+  for(const d of c.script)if(d.kind==='fn'){const ak=d.async?'async ':'',ps=d.params.map(p=>ts?`${p.name}: ${typeToTs(p.type)}`:p.name).join(', ');const retType=ts&&d.returnType?': '+typeToTs(d.returnType):'';o+=`  ${ak}#${d.name}(${ps})${retType} {\n    ${tx(d.body).split('\n').join('\n    ')}\n  }\n\n`;}
   for(const d of c.script)if(d.kind==='watch')o+=`  #watch_${d.deps.join('_')}() {\n    ${tx(d.body).split('\n').join('\n    ')}\n  }\n\n`;
   // Generate previous-value fields for watch dependencies
   const watchDecls = c.script.filter(d => d.kind === 'watch');
@@ -780,7 +797,7 @@ function generate(c) {
 }
 
 // ─── Public API ───
-function compile(source, fileName) {
+function compile(source, fileName, options) {
   const blocks = splitBlocks(source);
   if (!blocks.some(b => b.type === 'template'))
     return { success:false, diagnostics:[{level:'error',code:'E0002',message:'<template> ブロックが見つかりません'}] };
@@ -790,7 +807,7 @@ function compile(source, fileName) {
   const ast={meta,script,template,style,fileName};
   const checker=new TypeChecker(ast);const diagnostics=checker.check();
   if(diagnostics.some(d=>d.level==='error'))return{success:false,diagnostics,ast};
-  const output=generate(ast);
+  const output=generate(ast, options);
   return{success:true,output,diagnostics,ast};
 }
 

@@ -223,7 +223,7 @@ function cmdBuild() {
     const fileName = path.basename(file);
     console.log(`${c.b('▸')} Compiling ${fileName}...`);
 
-    const result = compile(source, fileName);
+    const result = compile(source, fileName, { target });
     for (const d of result.diagnostics) {
       const icon = d.level === 'error' ? c.err('✗') : c.warn('⚠');
       console.log(`  ${icon} [${d.code}] ${d.message}`);
@@ -283,7 +283,7 @@ function cmdCheck() {
   for (const file of files) {
     const source = fs.readFileSync(file, 'utf-8');
     const fileName = path.basename(file);
-    const result = compile(source, fileName);
+    const result = compile(source, fileName, { target });
 
     if (result.diagnostics.length === 0) {
       console.log(`  ${c.ok('✓')} ${fileName}`);
