@@ -52,6 +52,7 @@
         { "match": "\\b(import)\\s+(.+?)\\s+(from)\\s+(['\"])(.+?)\\4", "captures": { "1": {"name":"keyword.control.import.flare"}, "2": {"name":"variable.other.readwrite.flare"}, "3": {"name":"keyword.control.from.flare"}, "5": {"name":"string.quoted.module.flare"} } },
         { "match": ":\\s*(string|number|boolean|void|null|undefined|any|never|unknown|object|bigint|symbol)(\\[\\])?\\b", "captures": { "1": {"name":"support.type.primitive.ts"}, "2": {"name":"punctuation.definition.array.ts"} } },
         { "match": ":\\s*(\\w+)(\\[\\])?(?=\\s*[=,;)\\n{|])", "captures": { "1": {"name":"entity.name.type.ts"}, "2": {"name":"punctuation.definition.array.ts"} } },
+        { "match": "\\b([A-Z]\\w*)<[^>]+>", "captures": { "1": {"name":"entity.name.type.ts"} } },
         { "match": "<(\\w+)>", "captures": { "1": {"name":"entity.name.type.ts"} } },
         { "match": "\\b(interface|enum|namespace|abstract|implements|extends|keyof|typeof|infer|is|asserts|declare|readonly|override|satisfies)\\b", "name": "keyword.other.ts" },
         { "match": "\\b(if|else|for|while|do|switch|case|default|break|continue|return|await|async|try|catch|finally|throw|new|typeof|instanceof|in|of|const|let|var|delete|yield)\\b", "name": "keyword.control.flow.ts" },
@@ -96,7 +97,9 @@
       "name": "meta.interpolation.flare",
       "beginCaptures": { "0": {"name":"punctuation.definition.interpolation.begin.flare"} },
       "endCaptures": { "0": {"name":"punctuation.definition.interpolation.end.flare"} },
-      "patterns": [ { "include": "#script-content" } ]
+      "patterns": [
+        { "include": "#script-content" }
+      ]
     },
     "flare-for-open": {
       "begin": "(<)(#for)\\b",

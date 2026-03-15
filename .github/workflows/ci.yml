@@ -1,0 +1,39 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Syntax check
+        run: |
+          node -c flare-cli/lib/compiler.js
+          node -c flare-cli/bin/flare.js
+          node -c flare-vscode/extension.js
+      - name: Run tests
+        run: node test-bugs.js
+      - name: Build examples
+        run: |
+          cd examples
+          node ../flare-cli/bin/flare.js build
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Rust compiler
+        run: cd flare-compiler-rust && cargo build
+      - name: Run Rust tests
+        run: cd flare-compiler-rust && cargo test

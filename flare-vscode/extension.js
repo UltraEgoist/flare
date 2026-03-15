@@ -8,6 +8,7 @@ const fs = require('fs');
 
 let diagnosticCollection;
 const documentSymbols = new Map(); // uri -> Map<name, symbol>
+const documentHashes = new Map(); // uri -> hash for P2-54 incremental parsing
 
 function activate(context) {
   diagnosticCollection = vscode.languages.createDiagnosticCollection('flare');
@@ -29,6 +30,9 @@ function activate(context) {
   );
 
   context.subscriptions.push(vscode.languages.registerHoverProvider('flare', { provideHover }));
+  context.subscriptions.push(vscode.languages.registerCompletionItemProvider('flare', { provideCompletionItems }));
+  context.subscriptions.push(vscode.languages.registerDefinitionProvider('flare', { provideDefinition }));
+  context.subscriptions.push(vscode.languages.registerDocumentSymbolProvider('flare', { provideDocumentSymbols }));
 
   vscode.workspace.textDocuments.forEach(doc => { if (doc.languageId === 'flare') runDiagnostics(doc); });
 }
@@ -183,6 +187,123 @@ function mkHover(md, range) {
 }
 
 // ═══════════════════════════════════════════
+// P2-44: COMPLETION PROVIDER
+// ═══════════════════════════════════════════
+
+const COMPLETIONS = {
+  // Script keywords
+  'state': { kind: vscode.CompletionItemKind.Keyword, detail: 'リアクティブ変数', insertText: 'state ${1:name}: ${2:type} = ${3:value}' },
+  'prop': { kind: vscode.CompletionItemKind.Keyword, detail: '外部属性', insertText: 'prop ${1:name}: ${2:type}' },
+  'computed': { kind: vscode.CompletionItemKind.Keyword, detail: '派生値', insertText: 'computed ${1:name}: ${2:type} = ${3:expr}' },
+  'emit': { kind: vscode.CompletionItemKind.Keyword, detail: 'カスタムイベント', insertText: 'emit ${1:name}: ${2:type}' },
+  'ref': { kind: vscode.CompletionItemKind.Keyword, detail: 'DOM参照', insertText: 'ref ${1:name}: ${2:type}' },
+  'fn': { kind: vscode.CompletionItemKind.Keyword, detail: '関数定義', insertText: 'fn ${1:name}(${2:params}) {\n  ${3:}\n}' },
+  'on mount': { kind: vscode.CompletionItemKind.Keyword, detail: 'マウント時の処理', insertText: 'on mount {\n  ${1:}\n}' },
+  'on unmount': { kind: vscode.CompletionItemKind.Keyword, detail: 'アンマウント時の処理', insertText: 'on unmount {\n  ${1:}\n}' },
+  'on adopt': { kind: vscode.CompletionItemKind.Keyword, detail: 'スロット採用時の処理', insertText: 'on adopt {\n  ${1:}\n}' },
+  'watch': { kind: vscode.CompletionItemKind.Keyword, detail: '副作用', insertText: 'watch(${1:dependency}) {\n  ${2:}\n}' },
+  'provide': { kind: vscode.CompletionItemKind.Keyword, detail: 'コンテキスト提供', insertText: 'provide ${1:name}: ${2:type} = ${3:value}' },
+  'consume': { kind: vscode.CompletionItemKind.Keyword, detail: 'コンテキスト受信', insertText: 'consume ${1:name}: ${2:type}' },
+  'import': { kind: vscode.CompletionItemKind.Keyword, detail: 'インポート', insertText: 'import ${1:name} from "${2:path}"' },
+  'type': { kind: vscode.CompletionItemKind.Keyword, detail: '型エイリアス', insertText: 'type ${1:Name} = ${2:type}' },
+
+  // Template directives
+  '#if': { kind: vscode.CompletionItemKind.Keyword, detail: '条件分岐', insertText: '<#if condition="${1:condition}">\n  ${2:}\n</#if>' },
+  '#for': { kind: vscode.CompletionItemKind.Keyword, detail: 'ループ', insertText: '<#for each="${1:item}" of="${2:items}" key="${3:item.id}">\n  ${4:}\n</#for>' },
+  ':else': { kind: vscode.CompletionItemKind.Keyword, detail: 'else分岐', insertText: '<:else>' },
+  ':else-if': { kind: vscode.CompletionItemKind.Keyword, detail: 'else-if分岐', insertText: '<:else-if condition="${1:condition}">' },
+  ':empty': { kind: vscode.CompletionItemKind.Keyword, detail: '空時の表示', insertText: '<:empty>\n  ${1:}\n</:empty>' },
+  '{{ }}': { kind: vscode.CompletionItemKind.Snippet, detail: 'テンプレート式', insertText: '{{ ${1:expr} }}' },
+  '@html': { kind: vscode.CompletionItemKind.Keyword, detail: '生HTML注入', insertText: '@html="${1:content}"' },
+
+  // Attribute prefixes
+  '@click': { kind: vscode.CompletionItemKind.Method, detail: 'クリックイベント', insertText: '@click="${1:handler}"' },
+  '@input': { kind: vscode.CompletionItemKind.Method, detail: 'input イベント', insertText: '@input="${1:handler}"' },
+  ':class': { kind: vscode.CompletionItemKind.Method, detail: '動的クラス', insertText: ':class="${1:{ active: isActive }}"' },
+  ':disabled': { kind: vscode.CompletionItemKind.Method, detail: '動的disabled属性', insertText: ':disabled="${1:isDisabled}"' },
+  ':bind': { kind: vscode.CompletionItemKind.Method, detail: '双方向バインディング', insertText: ':bind="${1:stateName}"' },
+  'ref': { kind: vscode.CompletionItemKind.Method, detail: 'DOM参照', insertText: 'ref="${1:refName}"' },
+};
+
+function provideCompletionItems(document, position) {
+  const line = document.lineAt(position).text;
+  const beforeCursor = line.substring(0, position.character);
+  const items = [];
+
+  // Check if we're at start of a word (for keywords)
+  const wordMatch = beforeCursor.match(/[\w-]*$/);
+  if (wordMatch) {
+    for (const [key, config] of Object.entries(COMPLETIONS)) {
+      const item = new vscode.CompletionItem(key, config.kind);
+      item.detail = config.detail;
+      if (config.insertText) item.insertText = new vscode.SnippetString(config.insertText);
+      item.documentation = new vscode.MarkdownString(`**${key}** — ${config.detail}`);
+      items.push(item);
+    }
+  }
+
+  return items;
+}
+
+// ═══════════════════════════════════════════
+// P2-45: DEFINITION PROVIDER
+// ═══════════════════════════════════════════
+
+function provideDefinition(document, position) {
+  const line = document.lineAt(position).text;
+  const wordRange = document.getWordRangeAtPosition(position);
+  if (!wordRange) return null;
+
+  const word = document.getText(wordRange);
+  const uri = document.uri.toString();
+  const syms = documentSymbols.get(uri);
+
+  if (syms && syms.has(word)) {
+    const sym = syms.get(word);
+    return new vscode.Location(document.uri, new vscode.Position(sym.line, 0));
+  }
+
+  return null;
+}
+
+// ═══════════════════════════════════════════
+// P2-50: DOCUMENT SYMBOL PROVIDER
+// ═══════════════════════════════════════════
+
+function provideDocumentSymbols(document) {
+  const uri = document.uri.toString();
+  const syms = documentSymbols.get(uri);
+  if (!syms) return [];
+
+  const symbols = [];
+  const kindMap = {
+    state: vscode.SymbolKind.Variable,
+    prop: vscode.SymbolKind.Property,
+    computed: vscode.SymbolKind.Property,
+    fn: vscode.SymbolKind.Function,
+    emit: vscode.SymbolKind.Event,
+    ref: vscode.SymbolKind.Field,
+    provide: vscode.SymbolKind.Property,
+    consume: vscode.SymbolKind.Property,
+    watch: vscode.SymbolKind.Function,
+  };
+
+  for (const [name, sym] of syms) {
+    const kind = kindMap[sym.source] || vscode.SymbolKind.Variable;
+    const docSym = new vscode.DocumentSymbol(
+      name,
+      sym.source,
+      kind,
+      new vscode.Range(sym.line, 0, sym.line, 1),
+      new vscode.Range(sym.line, 0, sym.line, 1)
+    );
+    symbols.push(docSym);
+  }
+
+  return symbols;
+}
+
+// ═══════════════════════════════════════════
 // DIAGNOSTICS
 // ═══════════════════════════════════════════
 
@@ -192,6 +313,12 @@ function runDiagnostics(document) {
 
   const source = document.getText();
   const diagnostics = [];
+
+  // P2-54: Skip re-parsing if document hasn't changed
+  const uri = document.uri.toString();
+  const currentHash = hashContent(source);
+  if (documentHashes.get(uri) === currentHash) return;
+  documentHashes.set(uri, currentHash);
 
   // Parse blocks
   const blocks = [];
@@ -252,8 +379,23 @@ function runDiagnostics(document) {
         symbols.set(m[1], { type: m[2].trim(), source: 'prop', line: docLine, init: m[3]?.trim(), doc: jsDoc });
       if ((m = line.match(/^computed\s+(\w+)\s*:\s*([^=]+)\s*=\s*(.+)$/)))
         symbols.set(m[1], { type: m[2].trim(), source: 'computed', line: docLine, expr: m[3].trim(), doc: jsDoc });
-      if ((m = line.match(/^fn\s+(async\s+)?(\w+)\s*\(([^)]*)\)/)))
+      // P2-53: Handle multi-line fn declarations
+      if ((m = line.match(/^fn\s+(async\s+)?(\w+)\s*\(/))) {
+        let params = m[3] || '';
+        let j = i;
+        // Collect parameters across multiple lines if closing paren not found
+        while (!params.includes(')') && j < lines.length - 1) {
+          j++;
+          params += ' ' + lines[j];
+        }
+        const closeParen = params.indexOf(')');
+        if (closeParen !== -1) {
+          const paramsOnly = params.substring(0, closeParen).trim();
+          symbols.set(m[2], { type: 'function', source: 'fn', line: docLine, async: !!m[1], params: paramsOnly, doc: jsDoc });
+        }
+      } else if ((m = line.match(/^fn\s+(async\s+)?(\w+)\s*\(([^)]*)\)/))) {
         symbols.set(m[2], { type: 'function', source: 'fn', line: docLine, async: !!m[1], params: m[3].trim(), doc: jsDoc });
+      }
       if ((m = line.match(/^emit(?:\(([^)]*)\))?\s+(\w+)\s*:\s*(.+)$/)))
         symbols.set(m[2], { type: m[3].trim(), source: 'emit', line: docLine, options: m[1]?.trim(), doc: jsDoc });
       if ((m = line.match(/^ref\s+(\w+)\s*:\s*(.+)$/)))
@@ -456,6 +598,17 @@ function runDiagnostics(document) {
 }
 
 // ── Helpers ──
+
+// P2-54: Simple hash for incremental parsing check
+function hashContent(content) {
+  let h = 0;
+  for (let i = 0; i < content.length; i++) {
+    const char = content.charCodeAt(i);
+    h = ((h << 5) - h) + char;
+    h = h & h; // Convert to 32bit integer
+  }
+  return h.toString(36);
+}
 
 function mkDiag(sl, sc, el, ec, msg, level) {
   const severity = level === 'error' ? vscode.DiagnosticSeverity.Error

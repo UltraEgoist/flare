@@ -5,6 +5,8 @@
 
 // ─── Phase 1: Block Splitter ───
 function splitBlocks(source) {
+  // P1-12: Normalize CRLF line breaks
+  source = source.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const blocks = [];
   const re = /<(meta|script|template|style)(\s[^>]*)?>([\s\S]*?)<\/\1>/g;
   let m;
@@ -18,15 +20,57 @@ function splitBlocks(source) {
   return blocks;
 }
 
+// ─── Helper: Smart comma split that respects bracket nesting ───
+function smartSplit(s) {
+  const parts = [];
+  let current = '';
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if ((ch === '{' || ch === '[') && !isInString(s, i)) depth++;
+    else if ((ch === '}' || ch === ']') && !isInString(s, i)) depth--;
+    else if (ch === ',' && depth === 0 && !isInString(s, i)) {
+      parts.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+function isInString(s, pos) {
+  let inStr = false, strChar = '';
+  for (let i = 0; i < pos; i++) {
+    if ((s[i] === '"' || s[i] === "'" || s[i] === '`') && s[i-1] !== '\\') {
+      if (!inStr) { inStr = true; strChar = s[i]; }
+      else if (s[i] === strChar) { inStr = false; }
+    }
+  }
+  return inStr;
+}
+
+// P2-32: Helper to safely extract primitive name from type or return null for union/array/object types
+function typeName(t) {
+  if (!t) return null;
+  if (t.kind === 'primitive' && t.name) return t.name;
+  return null;
+}
+
 // ─── Type Parser ───
-function parseType(raw) {
+// P2-29: Add recursion depth limit to prevent stack overflow
+function parseType(raw, depth = 0) {
+  // P2-29: Max depth 20 to prevent infinite recursion
+  if (depth > 20) return { kind: 'primitive', name: 'any' };
+
   const s = raw.trim();
-  if (s.endsWith('[]')) return { kind: 'array', element: parseType(s.slice(0, -2)) };
+  if (s.endsWith('[]')) return { kind: 'array', element: parseType(s.slice(0, -2), depth + 1) };
   if (s.includes('|')) {
     return { kind: 'union', types: s.split('|').map(p => {
       const t = p.trim();
       if (t.startsWith('"') || t.startsWith("'")) return { kind: 'literal', value: t.replace(/["']/g, '') };
-      return parseType(t);
+      return parseType(t, depth + 1);
     })};
   }
   if (['string','number','boolean','void','null','undefined'].includes(s))
@@ -35,9 +79,9 @@ function parseType(raw) {
     return { kind: 'literal', value: s.replace(/["']/g, '') };
   if (s.startsWith('{') && s.endsWith('}')) {
     const fields = [];
-    for (const fp of s.slice(1,-1).trim().split(',').map(f=>f.trim()).filter(Boolean)) {
+    for (const fp of smartSplit(s.slice(1,-1)).filter(Boolean)) {
       const fm = fp.match(/^(\w+)(\?)?\s*:\s*(.+)$/);
-      if (fm) fields.push({ name: fm[1], type: parseType(fm[3]), optional: fm[2]==='?' });
+      if (fm) fields.push({ name: fm[1], type: parseType(fm[3], depth + 1), optional: fm[2]==='?' });
     }
     return { kind: 'object', fields };
   }
@@ -50,7 +94,8 @@ function parseMeta(content) {
   for (const line of content.split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('//'))) {
     const m = line.match(/^(\w+)\s*:\s*(.+)$/);
     if (!m) continue;
-    const val = m[2].trim().replace(/^["']|["']$/g, '');
+    // P1-23: Strip inline comments from value
+    let val = m[2].trim().replace(/\s*\/\/.*$/, '').trim().replace(/^["']|["']$/g, '');
     switch(m[1]) {
       case 'name': meta.name = val; break;
       case 'shadow': meta.shadow = val; break;
@@ -61,8 +106,22 @@ function parseMeta(content) {
   return meta;
 }
 
+// ─── Helper: Count braces while ignoring string literals and comments ───
+function countBraces(line) {
+  let stripped = line
+    .replace(/"(?:[^"\\]|\\.)*"/g, ' ')    // Strip double-quoted strings
+    .replace(/'(?:[^'\\]|\\.)*'/g, ' ')    // Strip single-quoted strings
+    .replace(/`(?:[^`\\]|\\.)*`/g, ' ')    // Strip backtick strings
+    .replace(/\/\/.*$/g, ' ');              // Strip comments
+  const opens = (stripped.match(/\{/g) || []).length;
+  const closes = (stripped.match(/\}/g) || []).length;
+  return opens - closes;
+}
+
 // ─── Phase 2: Script Parser ───
 function parseScript(content, startLine) {
+  // P1-12: Normalize CRLF line breaks
+  content = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   const decls = [];
   const lines = content.split('\n');
   let i = 0;
@@ -72,6 +131,18 @@ function parseScript(content, startLine) {
     if (!line || line.startsWith('//')) { i++; continue; }
 
     let m;
+    // P1-11: Support import * as ns, import Default, { Named }, and mixed imports
+    if ((m = line.match(/^import\s+\*\s+as\s+(\w+)\s+from\s+["']([^"']+)["']/))) {
+      // import * as ns from "mod"
+      decls.push({ kind:'import', defaultImport:undefined, namedImports:[`*:${m[1]}`], from:m[2], span:{line:ln} });
+      i++; continue;
+    }
+    if ((m = line.match(/^import\s+(\w+)\s*,\s*{\s*([^}]+)\s*}\s+from\s+["']([^"']+)["']/))) {
+      // import Default, { Named1, Named2 } from "mod"
+      const named = m[2].split(',').map(s=>s.trim());
+      decls.push({ kind:'import', defaultImport:m[1], namedImports:named, from:m[3], span:{line:ln} });
+      i++; continue;
+    }
     if ((m = line.match(/^import\s+(?:(\w+)\s+from\s+|{([^}]+)}\s+from\s+)["']([^"']+)["']/))) {
       decls.push({ kind:'import', defaultImport:m[1], namedImports:m[2]?.split(',').map(s=>s.trim()), from:m[3], span:{line:ln} });
       i++; continue;
@@ -118,7 +189,7 @@ function parseScript(content, startLine) {
       }
       let body='', bc=1; i++;
       while (i<lines.length && bc>0) {
-        const l=lines[i]; bc+=(l.match(/\{/g)||[]).length; bc-=(l.match(/\}/g)||[]).length;
+        const l=lines[i]; bc+=countBraces(l);
         if (bc>0) body+=(body?'\n':'')+l; i++;
       }
       decls.push({ kind:'fn', name:m[2], async:!!m[1], params, returnType:m[4]?parseType(m[4]):undefined, body:body.trim(), span:{line:ln} });
@@ -127,7 +198,7 @@ function parseScript(content, startLine) {
     if ((m = line.match(/^on\s+(mount|unmount|adopt)\s*\{/))) {
       let body='', bc=1; i++;
       while (i<lines.length && bc>0) {
-        const l=lines[i]; bc+=(l.match(/\{/g)||[]).length; bc-=(l.match(/\}/g)||[]).length;
+        const l=lines[i]; bc+=countBraces(l);
         if (bc>0) body+=(body?'\n':'')+l; i++;
       }
       decls.push({ kind:'lifecycle', event:m[1], body:body.trim(), span:{line:ln} });
@@ -137,7 +208,7 @@ function parseScript(content, startLine) {
       const deps=m[1].split(',').map(d=>d.trim());
       let body='', bc=1; i++;
       while (i<lines.length && bc>0) {
-        const l=lines[i]; bc+=(l.match(/\{/g)||[]).length; bc-=(l.match(/\}/g)||[]).length;
+        const l=lines[i]; bc+=countBraces(l);
         if (bc>0) body+=(body?'\n':'')+l; i++;
       }
       decls.push({ kind:'watch', deps, body:body.trim(), span:{line:ln} });
@@ -157,12 +228,24 @@ function parseScript(content, startLine) {
 }
 
 // ─── Phase 2: Template Parser ───
-function parseTemplateNodes(html) {
-  const nodes = []; let pos = 0;
+function parseTemplateNodes(html, errors) {
+  const errs = errors || [];
+  const nodes = [];
+  let pos = 0;
   while (pos < html.length) {
     if (html.startsWith('{{', pos)) {
       const end = html.indexOf('}}', pos+2);
-      if (end!==-1) { nodes.push({ kind:'interpolation', expr:html.substring(pos+2,end).trim() }); pos=end+2; continue; }
+      if (end!==-1) {
+        nodes.push({ kind:'interpolation', expr:html.substring(pos+2,end).trim() });
+        pos=end+2;
+        continue;
+      } else {
+        // Unclosed {{ - emit warning and treat as text
+        errs.push({ level: 'warning', code: 'W0301', message: 'Unclosed {{ in template' });
+        nodes.push({ kind:'text', value:'{{' });
+        pos+=2;
+        continue;
+      }
     }
     if (html.startsWith('<#if', pos)) { const r=parseIfBlock(html,pos); nodes.push(r.node); pos=r.end; continue; }
     if (html.startsWith('<#for', pos)) { const r=parseForBlock(html,pos); nodes.push(r.node); pos=r.end; continue; }
@@ -186,10 +269,24 @@ function parseElement(html,pos){
   while(depth>0&&sp<html.length){
     const no=html.indexOf(`<${tag}`,sp),nc=html.indexOf(close,sp);
     if(nc===-1)break;
-    if(no!==-1&&no<nc){const a=html.indexOf('>',no);if(a!==-1&&html[a-1]!=='/')depth++;sp=a+1;}
+    if(no!==-1&&no<nc){
+      // P2-30: Check that next char after tag name is whitespace, > or / (not partial match like <but for <button)
+      const nextCharIdx=no+tag.length+1;
+      if(nextCharIdx<html.length){
+        const nextChar=html[nextCharIdx];
+        if(/[\s>/]/.test(nextChar)){
+          const a=html.indexOf('>',no);if(a!==-1&&html[a-1]!=='/')depth++;sp=a+1;
+        }else{
+          sp=no+tag.length+1;
+        }
+      }else{
+        sp=no+tag.length+1;
+      }
+    }
     else{depth--;if(depth===0)return{node:{kind:'element',tag,attrs,children:parseTemplateNodes(html.substring(tagEnd,nc)),selfClosing:false},end:nc+close.length};sp=nc+close.length;}
   }
-  return{node:{kind:'element',tag,attrs,children:[],selfClosing:true},end:tagEnd};
+  // P1-13: Close tag mismatch - emit warning diagnostic
+  return{node:{kind:'element',tag,attrs,children:[],selfClosing:true,_missingCloseTag:true},end:tagEnd};
 }
 function parseAttrs(str){
   const attrs=[],re=/([:\@]?[\w\-\.]+(?:\|[\w]+)*)(?:\s*=\s*"([^"]*)")?/g;let m;
@@ -209,7 +306,10 @@ function parseAttrs(str){
 function findMatchingClose(html,start,bt){let d=1,p=start;const o=`<${bt}`,c=`</${bt}>`;while(d>0&&p<html.length){const no=html.indexOf(o,p),nc=html.indexOf(c,p);if(nc===-1)return html.length;if(no!==-1&&no<nc){d++;p=no+o.length;}else{d--;if(d===0)return nc;p=nc+c.length;}}return html.length;}
 function parseIfBlock(html,pos){
   const om=html.substring(pos).match(/<#if\s+condition="([^"]+)">/);
-  if(!om)throw new Error('Invalid #if');
+  if(!om){
+    // Return error node instead of throwing
+    return { node: { kind:'text', value: 'Error: Invalid #if syntax' }, end: pos+1 };
+  }
   const cond=om[1],sp=pos+om[0].length,cp=findMatchingClose(html,sp,'#if');
   let inner=html.substring(sp,cp),elseChildren,elseIfChain=[];
 
@@ -254,12 +354,18 @@ function parseIfBlock(html,pos){
 function parseForBlock(html,pos){
   // Support attributes in any order: each, of, key
   const tagMatch=html.substring(pos).match(/<#for\s+((?:[^>])+)>/);
-  if(!tagMatch)throw new Error('Invalid #for');
+  if(!tagMatch){
+    // Return error node instead of throwing
+    return { node: { kind:'text', value: 'Error: Invalid #for syntax' }, end: pos+1 };
+  }
   const attrStr=tagMatch[1];
   const eachM=attrStr.match(/each="([^"]+)"/);
   const ofM=attrStr.match(/of="([^"]+)"/);
   const keyM=attrStr.match(/key="([^"]+)"/);
-  if(!eachM||!ofM||!keyM)throw new Error('Invalid #for: missing required attributes (each, of, key)');
+  if(!eachM||!ofM||!keyM){
+    // Return error node instead of throwing
+    return { node: { kind:'text', value: 'Error: Invalid #for: missing required attributes (each, of, key)' }, end: pos+1 };
+  }
   const ep=eachM[1].split(',').map(s=>s.trim()),each=ep[0],index=ep[1],of_=ofM[1],key=keyM[1];
   const om=tagMatch; // compatibility
   const sp=pos+om[0].length,cp=findMatchingClose(html,sp,'#for');
@@ -273,15 +379,58 @@ function parseForBlock(html,pos){
 class TypeChecker {
   constructor(component){this.c=component;this.symbols=new Map();this.diags=[];this.typeAliases=new Map();}
   check(){this.buildSymbols();this.checkScript();this.checkTemplate(this.c.template);this.checkUnused();return this.diags;}
-  buildSymbols(){for(const d of this.c.script){switch(d.kind){case'state':this.symbols.set(d.name,{type:d.type,source:'state'});break;case'prop':this.symbols.set(d.name,{type:d.type,source:'prop'});break;case'computed':this.symbols.set(d.name,{type:d.type,source:'computed'});break;case'fn':this.symbols.set(d.name,{type:d.returnType||{kind:'primitive',name:'void'},source:'fn'});break;case'emit':this.symbols.set(d.name,{type:d.type,source:'emit'});break;case'ref':this.symbols.set(d.name,{type:d.type,source:'ref'});break;case'provide':this.symbols.set(d.name,{type:d.type,source:'provide'});break;case'consume':this.symbols.set(d.name,{type:d.type,source:'consume'});break;case'type':this.typeAliases.set(d.name,d.type);break;}}}
-  checkScript(){for(const d of this.c.script)if(d.kind==='state'){const t=this.infer(d.init);if(t&&!this.assignable(t,d.type))this.diags.push({level:'error',code:'E0201',message:`state '${d.name}' の初期値の型が一致しません`,span:d.span});}}
+  buildSymbols(){for(const d of this.c.script){switch(d.kind){case'import':
+      // P1-14: Add imported symbols to symbol table
+      if(d.defaultImport)this.symbols.set(d.defaultImport,{type:{kind:'primitive',name:'any'},source:'import'});
+      if(d.namedImports)for(const ni of d.namedImports){const name=ni.includes(':')?ni.split(':')[1]:ni;this.symbols.set(name,{type:{kind:'primitive',name:'any'},source:'import'});}
+      break;
+      case'state':this.symbols.set(d.name,{type:d.type,source:'state'});break;case'prop':this.symbols.set(d.name,{type:d.type,source:'prop'});break;case'computed':this.symbols.set(d.name,{type:d.type,source:'computed'});break;case'fn':this.symbols.set(d.name,{type:d.returnType||{kind:'primitive',name:'void'},source:'fn'});break;case'emit':this.symbols.set(d.name,{type:d.type,source:'emit'});break;case'ref':this.symbols.set(d.name,{type:d.type,source:'ref'});break;case'provide':this.symbols.set(d.name,{type:d.type,source:'provide'});break;case'consume':this.symbols.set(d.name,{type:d.type,source:'consume'});break;case'type':this.typeAliases.set(d.name,d.type);break;}}}
+  checkScript(){
+    for(const d of this.c.script){
+      if(d.kind==='state'){const t=this.infer(d.init);if(t&&!this.assignable(t,d.type))this.diags.push({level:'error',code:'E0201',message:`state '${d.name}' の初期値の型が一致しません`,span:d.span});}
+      // P1-15: Check prop default values against declared type
+      if(d.kind==='prop'&&d.default){const t=this.infer(d.default);if(t&&!this.assignable(t,d.type))this.diags.push({level:'error',code:'E0202',message:`prop '${d.name}' のデフォルト値の型が一致しません`,span:d.span});}
+    }
+    // P1-16: Detect computed referencing another computed declared after it
+    const computedMap=new Map();this.c.script.forEach(d=>{if(d.kind==='computed')computedMap.set(d.name,d);});
+    for(const d of this.c.script){
+      if(d.kind==='computed'){
+        const ids=(d.expr.match(/\b\w+\b/g)||[]);
+        for(const id of ids){
+          const ref=computedMap.get(id);
+          if(ref&&ref.span.line>d.span.line){
+            this.diags.push({level:'warning',code:'W0204',message:`computed '${d.name}' は後で宣言された '${id}' を参照しています`,span:d.span});
+          }
+        }
+      }
+    }
+    // P2-31: Warn about watch deps with nested paths (obj.field) which generate invalid code
+    for(const d of this.c.script){
+      if(d.kind==='watch'){
+        for(const dep of d.deps){
+          if(dep.includes('.')){
+            this.diags.push({level:'warning',code:'W0301',message:`watch dep '${dep}' がネストされたパス（obj.field）を含んでいます。生成されたコードが無効になります。トップレベルの state のみを使用してください`,span:d.span});
+          }
+        }
+      }
+    }
+  }
   checkTemplate(nodes){for(const n of nodes){if(n.kind==='interpolation')this.checkInterp(n);else if(n.kind==='element'){n.attrs.forEach(a=>{
     if(a.dynamic||a.bind)this.checkVars(a.value);
     // Security: warn about @html usage
     if(a.html)this.diags.push({level:'warning',code:'W0201',message:`@html はエスケープされません。XSSリスクがあるため、信頼できるデータのみ使用してください`});
     // Security: warn about dynamic href/src (potential javascript: URL injection)
     if(a.dynamic&&(a.name==='href'||a.name==='src'))this.diags.push({level:'warning',code:'W0202',message:`動的な :${a.name} は javascript: URL インジェクションのリスクがあります。入力を検証してください`});
-  });this.checkTemplate(n.children);}else if(n.kind==='if'){this.checkVars(n.condition);this.checkTemplate(n.children);if(n.elseIfChain)for(const branch of n.elseIfChain){this.checkVars(branch.condition);this.checkTemplate(branch.children);}if(n.elseChildren)this.checkTemplate(n.elseChildren);}else if(n.kind==='for'){this.checkVars(n.of);this.symbols.set(n.each,{type:{kind:'primitive',name:'string'},source:'loop'});if(n.index)this.symbols.set(n.index,{type:{kind:'primitive',name:'number'},source:'loop'});this.checkTemplate(n.children);if(n.emptyChildren)this.checkTemplate(n.emptyChildren);this.symbols.delete(n.each);if(n.index)this.symbols.delete(n.index);}}}
+    // P1-24: Warn about static id attributes (cause duplication on re-render)
+    if(a.name==='id'&&!a.dynamic)this.diags.push({level:'warning',code:'W0203',message:`静的な id 属性は再レンダリング時に複製されます。:key を使用するか、ループ外に移動してください`});
+  });this.checkTemplate(n.children);}else if(n.kind==='if'){this.checkVars(n.condition);this.checkTemplate(n.children);if(n.elseIfChain)for(const branch of n.elseIfChain){this.checkVars(branch.condition);this.checkTemplate(branch.children);}if(n.elseChildren)this.checkTemplate(n.elseChildren);}else if(n.kind==='for'){
+      // P2-33: Add loop vars to symbols BEFORE checking 'of' expression to avoid false positives
+      this.symbols.set(n.each,{type:{kind:'primitive',name:'string'},source:'loop'});
+      if(n.index)this.symbols.set(n.index,{type:{kind:'primitive',name:'number'},source:'loop'});
+      this.checkVars(n.of);
+      this.checkTemplate(n.children);if(n.emptyChildren)this.checkTemplate(n.emptyChildren);
+      this.symbols.delete(n.each);if(n.index)this.symbols.delete(n.index);
+    }}}
   checkInterp(n){const m=n.expr.match(/^(\w+)\.(\w+)\(/);if(m){const sym=this.symbols.get(m[1]);if(sym&&sym.type.kind==='primitive'){const strM=['toUpperCase','toLowerCase','trim','split','replace','includes','startsWith','endsWith','indexOf','slice'];if(sym.type.name==='number'&&strM.includes(m[2]))this.diags.push({level:'error',code:'E0302',message:`'${m[1]}' は 'number' 型ですが、'${m[2]}' メソッドはありません`,hint:`String(${m[1]}) に変換してください`});}}this.checkVars(n.expr);}
   checkVars(expr){const reserved=new Set(['true','false','null','undefined','void','typeof','instanceof','new','return','if','else','for','while','const','let','var','function','class','this','super','import','export','from','await','async','try','catch','finally','throw','length','map','filter','reduce','push','pop','trim','includes','indexOf','slice','splice','concat','join','split','toFixed','toString','toUpperCase','toLowerCase','replace','match','startsWith','endsWith','parseInt','parseFloat','String','Number','Boolean','Array','Object','Math','JSON','console','window','document','fetch','Promise','Date','Error','event','e','r','s','i','t','n','ok','data','error','index']);
     // Strip string literals before extracting identifiers
@@ -290,7 +439,33 @@ class TypeChecker {
   checkUnused(){const used=new Set();this.collectRefs(this.c.template,used);for(const d of this.c.script){if(d.kind==='computed')(d.expr.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='fn')(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='watch'){d.deps.forEach(dep=>used.add(dep));(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));}}for(const[name,sym]of this.symbols)if(sym.source==='state'&&!used.has(name))this.diags.push({level:'warning',code:'W0101',message:`state '${name}' が宣言されましたが使用されていません`});}
   collectRefs(nodes,refs){for(const n of nodes){if(n.kind==='interpolation')(n.expr.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));else if(n.kind==='element'){n.attrs.forEach(a=>{if(a.dynamic||a.event||a.bind)(a.value.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));});this.collectRefs(n.children,refs);}else if(n.kind==='if'){(n.condition.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.elseIfChain)for(const branch of n.elseIfChain){(branch.condition.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(branch.children,refs);}if(n.elseChildren)this.collectRefs(n.elseChildren,refs);}else if(n.kind==='for'){(n.of.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.emptyChildren)this.collectRefs(n.emptyChildren,refs);}}}
   infer(e){e=e.trim();if(/^-?\d+(\.\d+)?$/.test(e))return{kind:'primitive',name:'number'};if(/^["'`]/.test(e))return{kind:'primitive',name:'string'};if(e==='true'||e==='false')return{kind:'primitive',name:'boolean'};if(e==='null')return{kind:'primitive',name:'null'};if(e.startsWith('['))return{kind:'array',element:{kind:'primitive',name:'string'}};const sym=this.symbols.get(e);return sym?sym.type:null;}
-  assignable(from,to){if(from.kind===to.kind&&from.kind==='primitive')return from.name===to.name;if(from.kind==='array'&&to.kind==='array')return true;return true;}
+  assignable(from,to){
+    // Same type and kind
+    if(from.kind===to.kind) {
+      if(from.kind==='primitive') return from.name===to.name;
+      if(from.kind==='array') return this.assignable(from.element, to.element);
+      if(from.kind==='union') {
+        // All types in 'from' must be assignable to 'to'
+        return from.types.every(t => this.assignable(t, to));
+      }
+      if(from.kind==='object') {
+        // Check object field compatibility
+        if(!to.fields) return false;
+        for(const ff of from.fields) {
+          const tf = to.fields.find(f => f.name === ff.name);
+          if(!tf && !ff.optional) return false;
+          if(tf && !this.assignable(ff.type, tf.type)) return false;
+        }
+        return true;
+      }
+      return true;
+    }
+    // Union type: check if 'from' matches any member of 'to'
+    if(to.kind==='union') {
+      return to.types.some(t => this.assignable(from, t));
+    }
+    return false;
+  }
   similar(name){let best=null,bd=Infinity;for(const[k]of this.symbols){const d=lev(name,k);if(d<bd&&d<=2){bd=d;best=k;}}return best;}
 }
 function lev(a,b){const m=a.length,n=b.length,dp=Array.from({length:m+1},()=>Array(n+1).fill(0));for(let i=0;i<=m;i++)dp[i][0]=i;for(let j=0;j<=n;j++)dp[0][j]=j;for(let i=1;i<=m;i++)for(let j=1;j<=n;j++)dp[i][j]=Math.min(dp[i-1][j]+1,dp[i][j-1]+1,dp[i-1][j-1]+(a[i-1]===b[j-1]?0:1));return dp[m][n];}
@@ -311,11 +486,64 @@ function typeToTs(t) {
   }
 }
 
+// P1-20: Generate .d.ts declaration file for component's public API
+function generateDts(c) {
+  const className = c.meta.name.split('-').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('');
+  const tagName = c.meta.name;
+
+  let dts = `// Auto-generated type declarations for ${tagName}\n\n`;
+  dts += `declare global {\n`;
+  dts += `  namespace JSX {\n`;
+  dts += `    interface IntrinsicElements {\n`;
+  dts += `      '${tagName}': ${tagName}Props & React.DetailedHTMLProps<React.HTMLAttributes<HTMLElement>, HTMLElement>;\n`;
+  dts += `    }\n`;
+  dts += `  }\n`;
+  dts += `}\n\n`;
+
+  // Props interface
+  const props = c.script.filter(d => d.kind === 'prop');
+  if (props.length > 0) {
+    dts += `export interface ${tagName}Props {\n`;
+    for (const p of props) {
+      dts += `  ${p.name}?: ${typeToTs(p.type)};\n`;
+    }
+    dts += `}\n\n`;
+  }
+
+  // Events interface
+  const events = c.script.filter(d => d.kind === 'emit');
+  if (events.length > 0) {
+    dts += `export interface ${tagName}Events {\n`;
+    for (const e of events) {
+      dts += `  on${e.name.charAt(0).toUpperCase() + e.name.slice(1)}: (detail: ${typeToTs(e.type)}) => void;\n`;
+    }
+    dts += `}\n\n`;
+  }
+
+  // Main element class
+  dts += `export declare class ${className} extends HTMLElement {\n`;
+  for (const p of props) {
+    dts += `  ${p.name}: ${typeToTs(p.type)};\n`;
+  }
+  dts += `}\n\n`;
+  dts += `declare global {\n`;
+  dts += `  interface HTMLElementTagNameMap {\n`;
+  dts += `    '${tagName}': ${className};\n`;
+  dts += `  }\n`;
+  dts += `}\n\n`;
+  dts += `export {};\n`;
+
+  return dts;
+}
+
 // ─── Phase 5: Code Generator ───
 function generate(c, options) {
   const ts = options?.target === 'ts';
   const sv=[],pv=[],cv=[],en=[],rn=[],fn=[],prov=[],cons=[];
   for(const d of c.script){switch(d.kind){case'state':sv.push(d.name);break;case'prop':pv.push(d.name);break;case'computed':cv.push(d.name);break;case'emit':en.push(d.name);break;case'ref':rn.push(d.name);break;case'fn':fn.push(d.name);break;case'provide':prov.push(d.name);sv.push(d.name);break;case'consume':cons.push(d.name);break;}}
+
+  // P1-13: Track elements with missing close tags
+  const missingCloseTagElements = [];
 
   let _eid = 0;
   function nextEid() { return `fl-${_eid++}`; }
@@ -369,13 +597,17 @@ function generate(c, options) {
 
   function buildReplacements() {
     const reps = [];
-    for(const s of sv) reps.push([new RegExp(`\\b${s}\\b`,'g'), `this.#${s}`]);
-    for(const p of pv) reps.push([new RegExp(`\\b${p}\\b`,'g'), `this.#prop_${p}`]);
-    for(const v of cv) reps.push([new RegExp(`\\b${v}\\b`,'g'), `this.#${v}`]);
-    for(const e of en) reps.push([new RegExp(`\\b${e}\\(`,'g'), `this.#emit_${e}(`]);
-    for(const f of fn) reps.push([new RegExp(`\\b${f}\\(`,'g'), `this.#${f}(`]);
-    for(const ref of rn) reps.push([new RegExp(`\\b${ref}\\b`,'g'), `this.#${ref}`]);
-    for(const co of cons) reps.push([new RegExp(`\\b${co}\\b`,'g'), `this.#${co}`]);
+    // Sort all identifiers by length (longest first) to avoid partial matches
+    const allIds = [...new Set([...sv, ...pv, ...cv, ...en, ...fn, ...rn, ...cons])];
+    allIds.sort((a, b) => b.length - a.length);
+
+    for(const s of sv) reps.push([new RegExp(`(?<!#)\\b${s}\\b`,'g'), `this.#${s}`]);
+    for(const p of pv) reps.push([new RegExp(`(?<!#)\\b${p}\\b`,'g'), `this.#prop_${p}`]);
+    for(const v of cv) reps.push([new RegExp(`(?<!#)\\b${v}\\b`,'g'), `this.#${v}`]);
+    for(const e of en) reps.push([new RegExp(`(?<!#)\\b${e}\\(`,'g'), `this.#emit_${e}(`]);
+    for(const f of fn) reps.push([new RegExp(`(?<!#)\\b${f}\\(`,'g'), `this.#${f}(`]);
+    for(const ref of rn) reps.push([new RegExp(`(?<!#)\\b${ref}\\b`,'g'), `this.#${ref}`]);
+    for(const co of cons) reps.push([new RegExp(`(?<!#)\\b${co}\\b`,'g'), `this.#${co}`]);
     return reps;
   }
   const _defaultReplacements = buildReplacements();
@@ -407,6 +639,11 @@ function generate(c, options) {
 
   function elStr(n,indent,loopCtx){
     const pad=' '.repeat(indent);
+    // P1-13: Check for missing close tag
+    if (n._missingCloseTag) {
+      // Mark diagnostic to be emitted later
+      missingCloseTagElements.push(n.tag);
+    }
     const evAttrs=n.attrs.filter(a=>a.event);
     const bindAttrs=n.attrs.filter(a=>a.bind);
     const hasEvents = evAttrs.length > 0 || bindAttrs.length > 0;
@@ -517,6 +754,8 @@ function generate(c, options) {
         code += `    ${root}.querySelectorAll('[data-flare-id^="${binding.eid}-"]').forEach(el => {\n`;
         code += `      const __idx = parseInt(el.getAttribute('data-flare-id').split('-').pop(), 10);\n`;
 
+        // P1-17: Track event handler counters for duplicate event names
+        const eventCounters = {};
         for (const a of binding.events) {
           let pre = '';
           for (const mod of a.modifiers) {
@@ -537,13 +776,18 @@ function generate(c, options) {
           } else {
             h=`(e) => { ${pre}this.#${handlerBody}(); this.#update(); }`;
           }
-          code += `      const fn_${a.name} = ${h};\n`;
-          code += `      el.addEventListener('${a.name}', fn_${a.name});\n`;
-          code += `      this.#listeners.push([el, '${a.name}', fn_${a.name}]);\n`;
+          // P1-17: Use counter suffix for duplicate event handlers
+          const count = eventCounters[a.name] ?? 0;
+          eventCounters[a.name] = count + 1;
+          const fnName = count === 0 ? `fn_${a.name}` : `fn_${a.name}_${count}`;
+          code += `      const ${fnName} = ${h};\n`;
+          code += `      el.addEventListener('${a.name}', ${fnName});\n`;
+          code += `      this.#listeners.push([el, '${a.name}', ${fnName}]);\n`;
         }
 
         for (const a of binding.binds) {
-          code += `      const fn_input = (e) => { this.#${a.value} = e.target.value; this.#update(); };\n`;
+          const txExpr = loopCtx ? txLoop(a.value, loopCtx) : tx(a.value);
+          code += `      const fn_input = (e) => { ${txExpr} = e.target.value; this.#update(); };\n`;
           code += `      el.addEventListener('input', fn_input);\n`;
           code += `      this.#listeners.push([el, 'input', fn_input]);\n`;
         }
@@ -555,6 +799,8 @@ function generate(c, options) {
         code += `      const el = ${root}.querySelector('[data-flare-id="${binding.eid}"]');\n`;
         code += `      if (el) {\n`;
 
+        // P1-17: Track event handler counters for duplicate event names
+        const eventCounters = {};
         for (const a of binding.events) {
           let pre = '';
           for (const mod of a.modifiers) {
@@ -571,14 +817,19 @@ function generate(c, options) {
           } else {
             h=`(e) => { ${pre}this.#${a.value}(); this.#update(); }`;
           }
-          code += `        const fn_${a.name} = ${h};\n`;
-          code += `        el.addEventListener('${a.name}', fn_${a.name});\n`;
-          code += `        this.#listeners.push([el, '${a.name}', fn_${a.name}]);\n`;
+          // P1-17: Use counter suffix for duplicate event handlers
+          const count = eventCounters[a.name] ?? 0;
+          eventCounters[a.name] = count + 1;
+          const fnName = count === 0 ? `fn_${a.name}` : `fn_${a.name}_${count}`;
+          code += `        const ${fnName} = ${h};\n`;
+          code += `        el.addEventListener('${a.name}', ${fnName});\n`;
+          code += `        this.#listeners.push([el, '${a.name}', ${fnName}]);\n`;
         }
 
         for (const a of binding.binds) {
           // Preserve focus and cursor position on :bind inputs
-          code += `        const fn_input = (e) => { this.#${a.value} = e.target.value; this.#updateKeepFocus(el); };\n`;
+          const txExpr = tx(a.value);
+          code += `        const fn_input = (e) => { ${txExpr} = e.target.value; this.#updateKeepFocus(el); };\n`;
           code += `        el.addEventListener('input', fn_input);\n`;
           code += `        this.#listeners.push([el, 'input', fn_input]);\n`;
         }
@@ -597,16 +848,32 @@ function generate(c, options) {
     if (loopCtx.index && loopCtx.index !== '__idx') {
       r = r.replace(new RegExp(`\\b${loopCtx.index}\\b`, 'g'), '__idx');
     }
-    // Now apply normal transforms (but skip loop variables)
+    // Now apply normal transforms (but skip loop variables in ALL lists)
     const reps = [];
     for(const s of sv) {
       if (s === loopCtx.each || s === loopCtx.index) continue;
-      reps.push([new RegExp(`\\b${s}\\b`,'g'), `this.#${s}`]);
+      reps.push([new RegExp(`(?<!#)\\b${s}\\b`,'g'), `this.#${s}`]);
     }
-    for(const p of pv) reps.push([new RegExp(`\\b${p}\\b`,'g'), `this.#prop_${p}`]);
-    for(const v of cv) reps.push([new RegExp(`\\b${v}\\b`,'g'), `this.#${v}`]);
-    for(const e of en) reps.push([new RegExp(`\\b${e}\\(`,'g'), `this.#emit_${e}(`]);
-    for(const f of fn) reps.push([new RegExp(`\\b${f}\\(`,'g'), `this.#${f}(`]);
+    for(const p of pv) {
+      if (p === loopCtx.each || p === loopCtx.index) continue;
+      reps.push([new RegExp(`(?<!#)\\b${p}\\b`,'g'), `this.#prop_${p}`]);
+    }
+    for(const v of cv) {
+      if (v === loopCtx.each || v === loopCtx.index) continue;
+      reps.push([new RegExp(`(?<!#)\\b${v}\\b`,'g'), `this.#${v}`]);
+    }
+    for(const e of en) {
+      if (e === loopCtx.each || e === loopCtx.index) continue;
+      reps.push([new RegExp(`(?<!#)\\b${e}\\(`,'g'), `this.#emit_${e}(`]);
+    }
+    for(const f of fn) {
+      if (f === loopCtx.each || f === loopCtx.index) continue;
+      reps.push([new RegExp(`(?<!#)\\b${f}\\(`,'g'), `this.#${f}(`]);
+    }
+    for(const ref of rn) {
+      if (ref === loopCtx.each || ref === loopCtx.index) continue;
+      reps.push([new RegExp(`(?<!#)\\b${ref}\\b`,'g'), `this.#${ref}`]);
+    }
     return txSafe(r, reps);
   }
 
@@ -634,7 +901,9 @@ function generate(c, options) {
   for(const d of c.script) {
     if(d.kind==='prop') {
       const kebab=camelToKebab(d.name);
-      const coerce = d.type.name==='number'?`parseFloat(v) || 0`:d.type.name==='boolean'?`v !== null && v !== 'false'`:`v || ${d.default||"''"}`;
+      // P2-32: Use typeName() to safely extract primitive name
+      const tn = typeName(d.type);
+      const coerce = tn==='number'?`parseFloat(v) || 0`:tn==='boolean'?`v !== null && v !== 'false'`:`v || ${d.default||"''"}`;
       o+=`    { const v = this.getAttribute('${kebab}'); if (v !== null) this.#prop_${d.name} = ${coerce}; }\n`;
     }
   }
@@ -669,13 +938,16 @@ function generate(c, options) {
     o+=`  attributeChangedCallback(name, oldVal, newVal) {\n    if (oldVal === newVal) return;\n`;
     for(const d of c.script)if(d.kind==='prop'){
       const kebab=camelToKebab(d.name);
-      const coerce = d.type.name==='number'?'parseFloat(newVal) || 0':d.type.name==='boolean'?"newVal !== null && newVal !== 'false'":"newVal || ''";
+      // P2-32: Use typeName() to safely extract primitive name
+      const tn = typeName(d.type);
+      const coerce = tn==='number'?'parseFloat(newVal) || 0':tn==='boolean'?"newVal !== null && newVal !== 'false'":"newVal || ''";
       o+=`    if (name === '${kebab}') { this.#prop_${d.name} = ${coerce}; this.#update(); }\n`;
     }
     o+=`  }\n\n`;
   }
 
-  for(const d of c.script)if(d.kind==='prop'){const def=d.default||(d.type.name==='number'?'0':d.type.name==='boolean'?'false':"''");const tsType=ts?': '+typeToTs(d.type):'';o+=`  #prop_${d.name}${tsType} = ${def};\n  get ${d.name}()${tsType} { return this.#prop_${d.name}; }\n\n`;}
+  // P2-32: Use typeName() to safely extract primitive name for default values
+  for(const d of c.script)if(d.kind==='prop'){const tn=typeName(d.type);const def=d.default||(tn==='number'?'0':tn==='boolean'?'false':"''");const tsType=ts?': '+typeToTs(d.type):'';o+=`  #prop_${d.name}${tsType} = ${def};\n  get ${d.name}()${tsType} { return this.#prop_${d.name}; }\n\n`;}
   for(const d of c.script)if(d.kind==='computed'){const tsType=ts?': '+typeToTs(d.type):'';o+=`  get #${d.name}()${tsType} { return ${tx(d.expr)}; }\n\n`;}
   for(const d of c.script)if(d.kind==='emit'){const opts=d.options||{bubbles:true,composed:true};const detailType=ts?': '+typeToTs(d.type):'';o+=`  #emit_${d.name}(detail${detailType})${ts?': void':''} {\n    this.dispatchEvent(new CustomEvent('${d.name}', { detail, bubbles: ${opts.bubbles}, composed: ${opts.composed} }));\n  }\n\n`;}
   for(const d of c.script)if(d.kind==='fn'){const ak=d.async?'async ':'',ps=d.params.map(p=>ts?`${p.name}: ${typeToTs(p.type)}`:p.name).join(', ');const retType=ts&&d.returnType?': '+typeToTs(d.returnType):'';o+=`  ${ak}#${d.name}(${ps})${retType} {\n    ${tx(d.body).split('\n').join('\n    ')}\n  }\n\n`;}
@@ -770,14 +1042,14 @@ function generate(c, options) {
   o+=`    if (val == null) return '';\n`;
   o+=`    const s = String(val);\n`;
   o+=`    if (!/[&<>"'`+'`]/.test(s)) return s;\n';
-  o+=`    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\`/g,'&#96;');\n`;
+  o+=`    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\`/g,'&#96;').replace(/\\n/g,'&#10;').replace(/\\r/g,'&#13;');\n`;
   o+=`  }\n\n`;
 
-  // #escUrl - URL sanitization (blocks javascript:, data:, vbscript: URLs)
+  // #escUrl - URL sanitization (blocks javascript:, data:, vbscript:, blob:, file: URLs)
   o+=`  #escUrl(val) {\n`;
   o+=`    if (val == null) return '';\n`;
   o+=`    const s = String(val).trim();\n`;
-  o+=`    if (/^\\s*(javascript|data|vbscript)\\s*:/i.test(s)) return 'about:blank';\n`;
+  o+=`    if (/(javascript|data|vbscript|blob|file)\\s*:/i.test(s)) return 'about:blank';\n`;
   o+=`    return this.#escAttr(s);\n`;
   o+=`  }\n`;
 
@@ -789,6 +1061,11 @@ function generate(c, options) {
   o+=`} else {\n`;
   o+=`  customElements.define('${tn}', ${cn});\n`;
   o+=`}\n`;
+
+  // P1-19: For TypeScript, add export
+  if(ts) {
+    o+=`export default ${cn};\nexport {};\n`;
+  }
 
   // Close IIFE
   o += `\n})();\n`;
@@ -806,9 +1083,13 @@ function compile(source, fileName, options) {
   if(!meta.name)meta.name='x-'+fileName.replace(/\.flare$/,'').replace(/([A-Z])/g,'-$1').toLowerCase();
   const ast={meta,script,template,style,fileName};
   const checker=new TypeChecker(ast);const diagnostics=checker.check();
+  // P1-18: Warn if extends is specified (not yet supported)
+  if(meta.extends)diagnostics.push({level:'warning',code:'W0205',message:'extends はまだサポートされていません'});
   if(diagnostics.some(d=>d.level==='error'))return{success:false,diagnostics,ast};
   const output=generate(ast, options);
-  return{success:true,output,diagnostics,ast};
+  // P1-20: Generate .d.ts when target is 'ts'
+  const dtsOutput=options?.target==='ts'?generateDts(ast):undefined;
+  return{success:true,output,dtsOutput,diagnostics,ast};
 }
 
 module.exports = { compile, splitBlocks, parseTemplateNodes, TypeChecker, generate };

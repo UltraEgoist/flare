@@ -2,7 +2,7 @@
 
 // ============================================================
 // Flare CLI
-// Commands: init, build, dev, check, fmt
+// Commands: init, build, dev, check
 // ============================================================
 
 const fs = require('fs');
@@ -39,11 +39,14 @@ function cmdInit() {
   const name = args[1];
   if (!name) { console.error(c.err('Usage: flare init <project-name>')); process.exit(1); }
 
+  // P1-26: Validate project name (npm standard: lowercase, numbers, hyphens, underscores, dots)
+  if (!/^[a-z0-9][-a-z0-9_.]*$/.test(name)) {
+    console.error(c.err(`無効なプロジェクト名: '${name}'. 小文字、数字、ハイフン、アンダースコア、ドットのみ使用できます`));
+    process.exit(1);
+  }
+
   const dir = path.resolve(name);
   if (fs.existsSync(dir)) { console.error(c.err(`ディレクトリ '${name}' は既に存在します`)); process.exit(1); }
-
-  // Read templates from the package's template/ directory
-  const tplDir = path.join(__dirname, '..', 'template');
 
   console.log(`\n  ${c.info('▸')} ${c.b('Creating')} ${name}/\n`);
 
@@ -250,9 +253,15 @@ function cmdBuild() {
 
   // Write bundle to dist/ root
   if (bundleParts.length > 0) {
-    const bundleHeader = `// Flare Bundle - ${new Date().toISOString()}\n// ${bundleParts.length} component(s)\n\n// Deferred registration queue: all classes are defined first,\n// then all customElements.define() calls happen at the end.\n// This ensures nested components work regardless of file order.\nconst __flareDefineQueue = [];\n\n`;
+    const bundleHeader = `// Flare Bundle - ${new Date().toISOString()}\n// ${bundleParts.length} component(s)\n\n`;
+    // P2-40: Add comment warning if ESM format is requested (not yet fully supported)
+    let esmWarning = '';
+    if (config.format === 'esm') {
+      esmWarning = `// WARNING: ESM format requested but bundler is script-tag only.\n// ESM support coming in a future version.\n`;
+    }
+    const deferred = `// Deferred registration queue: all classes are defined first,\n// then all customElements.define() calls happen at the end.\n// This ensures nested components work regardless of file order.\nconst __flareDefineQueue = [];\n\n`;
     const bundleFooter = `\n// Register all components at once (child components are available when parent renders)\n__flareDefineQueue.forEach(([tag, cls]) => {\n  if (!customElements.get(tag)) customElements.define(tag, cls);\n});\n`;
-    const bundleContent = bundleHeader + bundleParts.join('\n') + bundleFooter;
+    const bundleContent = bundleHeader + esmWarning + deferred + bundleParts.join('\n') + bundleFooter;
     const bundlePath = path.join(outDir, bundleName);
     fs.writeFileSync(bundlePath, bundleContent);
     const bundleSize = (Buffer.byteLength(bundleContent) / 1024).toFixed(1);
@@ -269,6 +278,8 @@ function cmdBuild() {
 function cmdCheck() {
   const config = loadConfig();
   const srcDir = path.resolve(config.src || args[1] || 'src/components');
+  // P1-26b: Define target variable (was undefined before)
+  const target = getArg('--target') || config.target || 'js';
 
   if (!fs.existsSync(srcDir)) {
     console.error(c.err(`ソースディレクトリが見つかりません: ${srcDir}`));
@@ -325,15 +336,23 @@ function cmdDev() {
     if (debounce) clearTimeout(debounce);
     debounce = setTimeout(() => {
       console.log(`\n${c.info('▸')} ${filename} changed, recompiling...`);
-      buildAll(srcDir, outDir);
+      // P2-38: Wrap buildAll in try/catch to handle build failures gracefully
+      try {
+        buildAll(srcDir, outDir);
+      } catch (err) {
+        console.error(c.err(`Build error: ${err.message}`));
+      }
     }, 150);
   });
 
   // Simple static server
+  // P2-36: Add MIME types for .ts, .jsx, .tsx, .wasm, .mjs
   const MIME = {
     '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
     '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml',
     '.ico': 'image/x-icon',
+    '.ts': 'text/typescript', '.jsx': 'text/jsx', '.tsx': 'text/tsx',
+    '.wasm': 'application/wasm', '.mjs': 'text/javascript',
   };
 
   const server = http.createServer((req, res) => {
@@ -365,23 +384,44 @@ function cmdDev() {
 
     for (const filePath of candidates) {
       const resolved = path.resolve(filePath);
-      // Security: ensure resolved path is within an allowed root
-      if (!allowedRoots.some(root => resolved.startsWith(root + path.sep) || resolved === root)) continue;
-      if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-        const ext = path.extname(resolved);
+      // Security: resolve symlinks and ensure resolved path is within an allowed root
+      let realPath = resolved;
+      try {
+        realPath = fs.realpathSync(resolved);
+      } catch (e) {
+        // File doesn't exist yet, use resolved path as-is
+      }
+      if (!allowedRoots.some(root => realPath.startsWith(root + path.sep) || realPath === root)) continue;
+      if (fs.existsSync(realPath) && fs.statSync(realPath).isFile()) {
+        const ext = path.extname(realPath);
         const mime = MIME[ext] || 'application/octet-stream';
+        // P2-34: Add CORS header
+        // P2-35: Add CSP header for dev mode
         res.writeHead(200, {
           'Content-Type': mime + '; charset=utf-8',
           'Cache-Control': 'no-cache',
           'X-Content-Type-Options': 'nosniff',
+          'Access-Control-Allow-Origin': '*',
+          'Content-Security-Policy': "default-src 'self' 'unsafe-inline' 'unsafe-eval'",
         });
-        fs.createReadStream(resolved).pipe(res);
+        fs.createReadStream(realPath).pipe(res);
         return;
       }
     }
 
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('404 Not Found');
+  });
+
+  // P2-37: Add error handler for port conflicts
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(c.err(`ポート ${port} は既に使用されています。別のポートを指定してください:`));
+      console.error(c.err(`  flare dev --port ${port + 1}`));
+      process.exit(1);
+    } else {
+      throw err;
+    }
   });
 
   server.listen(port, () => {
@@ -421,9 +461,15 @@ function buildAll(srcDir, outDir) {
 
   // Write bundle to dist/ root
   if (bundleParts.length > 0) {
-    const bundleHeader = `// Flare Bundle - ${new Date().toISOString()}\n// ${bundleParts.length} component(s)\n\nconst __flareDefineQueue = [];\n\n`;
+    const bundleHeader = `// Flare Bundle - ${new Date().toISOString()}\n// ${bundleParts.length} component(s)\n\n`;
+    // P2-40: Add comment warning if ESM format is requested (not yet fully supported)
+    let esmWarning = '';
+    if (config.format === 'esm') {
+      esmWarning = `// WARNING: ESM format requested but bundler is script-tag only.\n// ESM support coming in a future version.\n`;
+    }
+    const deferred = `const __flareDefineQueue = [];\n\n`;
     const bundleFooter = `\n__flareDefineQueue.forEach(([tag, cls]) => {\n  if (!customElements.get(tag)) customElements.define(tag, cls);\n});\n`;
-    fs.writeFileSync(path.join(outDir, bundleName), bundleHeader + bundleParts.join('\n') + bundleFooter);
+    fs.writeFileSync(path.join(outDir, bundleName), bundleHeader + esmWarning + deferred + bundleParts.join('\n') + bundleFooter);
   }
 
   if (fail === 0) {
@@ -438,7 +484,11 @@ function loadConfig() {
   const configPath = path.resolve('flare.config.json');
   if (fs.existsSync(configPath)) {
     try { return JSON.parse(fs.readFileSync(configPath, 'utf-8')); }
-    catch (e) { return {}; }
+    // P2-39: Log warning when JSON parse fails instead of silently returning {}
+    catch (e) {
+      console.warn(c.warn(`⚠ Warning: flare.config.json のパース失敗: ${e.message}`));
+      return {};
+    }
   }
   return {};
 }
