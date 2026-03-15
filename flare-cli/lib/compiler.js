@@ -209,9 +209,16 @@ function parseIfBlock(html,pos){
   return{node:{kind:'if',condition:cond,children:parseTemplateNodes(inner),elseChildren},end:cp+'</#if>'.length};
 }
 function parseForBlock(html,pos){
-  const om=html.substring(pos).match(/<#for\s+each="([^"]+)"\s+of="([^"]+)"\s+key="([^"]+)">/);
-  if(!om)throw new Error('Invalid #for');
-  const ep=om[1].split(',').map(s=>s.trim()),each=ep[0],index=ep[1],of_=om[2],key=om[3];
+  // Support attributes in any order: each, of, key
+  const tagMatch=html.substring(pos).match(/<#for\s+((?:[^>])+)>/);
+  if(!tagMatch)throw new Error('Invalid #for');
+  const attrStr=tagMatch[1];
+  const eachM=attrStr.match(/each="([^"]+)"/);
+  const ofM=attrStr.match(/of="([^"]+)"/);
+  const keyM=attrStr.match(/key="([^"]+)"/);
+  if(!eachM||!ofM||!keyM)throw new Error('Invalid #for: missing required attributes (each, of, key)');
+  const ep=eachM[1].split(',').map(s=>s.trim()),each=ep[0],index=ep[1],of_=ofM[1],key=keyM[1];
+  const om=tagMatch; // compatibility
   const sp=pos+om[0].length,cp=findMatchingClose(html,sp,'#for');
   let inner=html.substring(sp,cp),emptyChildren;
   const emm=inner.match(/<:empty>([\s\S]*?)<\/:empty>/);
@@ -227,7 +234,10 @@ class TypeChecker {
   checkScript(){for(const d of this.c.script)if(d.kind==='state'){const t=this.infer(d.init);if(t&&!this.assignable(t,d.type))this.diags.push({level:'error',code:'E0201',message:`state '${d.name}' の初期値の型が一致しません`,span:d.span});}}
   checkTemplate(nodes){for(const n of nodes){if(n.kind==='interpolation')this.checkInterp(n);else if(n.kind==='element'){n.attrs.forEach(a=>{if(a.dynamic||a.bind)this.checkVars(a.value);});this.checkTemplate(n.children);}else if(n.kind==='if'){this.checkVars(n.condition);this.checkTemplate(n.children);if(n.elseChildren)this.checkTemplate(n.elseChildren);}else if(n.kind==='for'){this.checkVars(n.of);this.symbols.set(n.each,{type:{kind:'primitive',name:'string'},source:'loop'});if(n.index)this.symbols.set(n.index,{type:{kind:'primitive',name:'number'},source:'loop'});this.checkTemplate(n.children);if(n.emptyChildren)this.checkTemplate(n.emptyChildren);this.symbols.delete(n.each);if(n.index)this.symbols.delete(n.index);}}}
   checkInterp(n){const m=n.expr.match(/^(\w+)\.(\w+)\(/);if(m){const sym=this.symbols.get(m[1]);if(sym&&sym.type.kind==='primitive'){const strM=['toUpperCase','toLowerCase','trim','split','replace','includes','startsWith','endsWith','indexOf','slice'];if(sym.type.name==='number'&&strM.includes(m[2]))this.diags.push({level:'error',code:'E0302',message:`'${m[1]}' は 'number' 型ですが、'${m[2]}' メソッドはありません`,hint:`String(${m[1]}) に変換してください`});}}this.checkVars(n.expr);}
-  checkVars(expr){const reserved=new Set(['true','false','null','undefined','void','typeof','instanceof','new','return','if','else','for','while','const','let','var','function','class','this','super','import','export','from','await','async','try','catch','finally','throw','length','map','filter','reduce','push','pop','trim','includes','indexOf','slice','splice','concat','join','split','toFixed','toString','toUpperCase','toLowerCase','replace','match','startsWith','endsWith','parseInt','parseFloat','String','Number','Boolean','Array','Object','Math','JSON','console','window','document','fetch','Promise','Date','Error','event','e','r','s','i','t','n','ok','data','error','index']);const ids=expr.match(/\b[a-zA-Z_]\w*\b/g)||[];for(const id of ids){if(reserved.has(id)||this.typeAliases.has(id))continue;if(!this.symbols.has(id)){const sug=this.similar(id);this.diags.push({level:'error',code:'E0301',message:`未定義の識別子 '${id}'`,hint:sug?`'${sug}' のことですか？`:undefined});}}}
+  checkVars(expr){const reserved=new Set(['true','false','null','undefined','void','typeof','instanceof','new','return','if','else','for','while','const','let','var','function','class','this','super','import','export','from','await','async','try','catch','finally','throw','length','map','filter','reduce','push','pop','trim','includes','indexOf','slice','splice','concat','join','split','toFixed','toString','toUpperCase','toLowerCase','replace','match','startsWith','endsWith','parseInt','parseFloat','String','Number','Boolean','Array','Object','Math','JSON','console','window','document','fetch','Promise','Date','Error','event','e','r','s','i','t','n','ok','data','error','index']);
+    // Strip string literals before extracting identifiers
+    const stripped=expr.replace(/"(?:[^"\\]|\\.)*"/g,' ').replace(/'(?:[^'\\]|\\.)*'/g,' ').replace(/`(?:[^`\\]|\\.)*`/g,' ');
+    const ids=stripped.match(/\b[a-zA-Z_]\w*\b/g)||[];for(const id of ids){if(reserved.has(id)||this.typeAliases.has(id))continue;if(!this.symbols.has(id)){const sug=this.similar(id);this.diags.push({level:'error',code:'E0301',message:`未定義の識別子 '${id}'`,hint:sug?`'${sug}' のことですか？`:undefined});}}}
   checkUnused(){const used=new Set();this.collectRefs(this.c.template,used);for(const d of this.c.script){if(d.kind==='computed')(d.expr.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='fn')(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='watch'){d.deps.forEach(dep=>used.add(dep));(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));}}for(const[name,sym]of this.symbols)if(sym.source==='state'&&!used.has(name))this.diags.push({level:'warning',code:'W0101',message:`state '${name}' が宣言されましたが使用されていません`});}
   collectRefs(nodes,refs){for(const n of nodes){if(n.kind==='interpolation')(n.expr.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));else if(n.kind==='element'){n.attrs.forEach(a=>{if(a.dynamic||a.event||a.bind)(a.value.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));});this.collectRefs(n.children,refs);}else if(n.kind==='if'){(n.condition.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.elseChildren)this.collectRefs(n.elseChildren,refs);}else if(n.kind==='for'){(n.of.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.emptyChildren)this.collectRefs(n.emptyChildren,refs);}}}
   infer(e){e=e.trim();if(/^-?\d+(\.\d+)?$/.test(e))return{kind:'primitive',name:'number'};if(/^["'`]/.test(e))return{kind:'primitive',name:'string'};if(e==='true'||e==='false')return{kind:'primitive',name:'boolean'};if(e==='null')return{kind:'primitive',name:'null'};if(e.startsWith('['))return{kind:'array',element:{kind:'primitive',name:'string'}};const sym=this.symbols.get(e);return sym?sym.type:null;}
@@ -244,7 +254,66 @@ function generate(c) {
   let _eid = 0;
   function nextEid() { return `fl-${_eid++}`; }
 
-  function tx(expr){let r=expr;for(const s of sv)r=r.replace(new RegExp(`\\b${s}\\b`,'g'),`this.#${s}`);for(const p of pv)r=r.replace(new RegExp(`\\b${p}\\b`,'g'),`this.#prop_${p}`);for(const v of cv)r=r.replace(new RegExp(`\\b${v}\\b`,'g'),`this.#${v}`);for(const e of en)r=r.replace(new RegExp(`\\b${e}\\(`,'g'),`this.#emit_${e}(`);for(const f of fn)r=r.replace(new RegExp(`\\b${f}\\(`,'g'),`this.#${f}(`);for(const ref of rn)r=r.replace(new RegExp(`\\b${ref}\\b`,'g'),`this.#${ref}`);return r;}
+  // Replace identifiers but skip those inside string literals
+  function txSafe(expr, replacements) {
+    // Split expression into string-literal and non-string parts
+    const parts = [];
+    let i = 0;
+    while (i < expr.length) {
+      const ch = expr[i];
+      if (ch === '"' || ch === "'" || ch === '`') {
+        // Find matching close quote (handle escapes)
+        const quote = ch;
+        let j = i + 1;
+        while (j < expr.length) {
+          if (expr[j] === '\\') { j += 2; continue; }
+          if (expr[j] === quote) { j++; break; }
+          if (quote === '`' && expr[j] === '$' && expr[j+1] === '{') {
+            // Template literal expression - find matching }
+            let depth = 1; j += 2;
+            while (j < expr.length && depth > 0) {
+              if (expr[j] === '{') depth++;
+              else if (expr[j] === '}') depth--;
+              if (depth > 0) j++;
+              else { j++; break; }
+            }
+            continue;
+          }
+          j++;
+        }
+        parts.push({ text: expr.substring(i, j), isString: true });
+        i = j;
+      } else {
+        let j = i;
+        while (j < expr.length && expr[j] !== '"' && expr[j] !== "'" && expr[j] !== '`') j++;
+        parts.push({ text: expr.substring(i, j), isString: false });
+        i = j;
+      }
+    }
+    // Apply replacements only to non-string parts
+    return parts.map(p => {
+      if (p.isString) return p.text;
+      let t = p.text;
+      for (const [pattern, replacement] of replacements) {
+        t = t.replace(pattern, replacement);
+      }
+      return t;
+    }).join('');
+  }
+
+  function buildReplacements() {
+    const reps = [];
+    for(const s of sv) reps.push([new RegExp(`\\b${s}\\b`,'g'), `this.#${s}`]);
+    for(const p of pv) reps.push([new RegExp(`\\b${p}\\b`,'g'), `this.#prop_${p}`]);
+    for(const v of cv) reps.push([new RegExp(`\\b${v}\\b`,'g'), `this.#${v}`]);
+    for(const e of en) reps.push([new RegExp(`\\b${e}\\(`,'g'), `this.#emit_${e}(`]);
+    for(const f of fn) reps.push([new RegExp(`\\b${f}\\(`,'g'), `this.#${f}(`]);
+    for(const ref of rn) reps.push([new RegExp(`\\b${ref}\\b`,'g'), `this.#${ref}`]);
+    return reps;
+  }
+  const _defaultReplacements = buildReplacements();
+
+  function tx(expr){ return txSafe(expr, _defaultReplacements); }
   function tagToClass(t){return t.split('-').map(p=>p.charAt(0).toUpperCase()+p.slice(1)).join('');}
   function camelToKebab(s){return s.replace(/([A-Z])/g,'-$1').toLowerCase();}
   function minCss(css){return css.replace(/\s+/g,' ').replace(/\s*{\s*/g,'{').replace(/\s*}\s*/g,'}').replace(/\s*:\s*/g,':').replace(/\s*;\s*/g,';').trim();}
@@ -256,17 +325,17 @@ function generate(c) {
 
   // Transform expression inside a loop context - don't transform loop variables
   function txLoop(expr, loopCtx) {
-    let r = expr;
+    const reps = [];
     for(const s of sv) {
       if (s === loopCtx.each || s === loopCtx.index) continue;
-      r=r.replace(new RegExp(`\\b${s}\\b`,'g'),`this.#${s}`);
+      reps.push([new RegExp(`\\b${s}\\b`,'g'), `this.#${s}`]);
     }
-    for(const p of pv) r=r.replace(new RegExp(`\\b${p}\\b`,'g'),`this.#prop_${p}`);
-    for(const v of cv) r=r.replace(new RegExp(`\\b${v}\\b`,'g'),`this.#${v}`);
-    for(const e of en) r=r.replace(new RegExp(`\\b${e}\\(`,'g'),`this.#emit_${e}(`);
-    for(const f of fn) r=r.replace(new RegExp(`\\b${f}\\(`,'g'),`this.#${f}(`);
-    for(const ref of rn) r=r.replace(new RegExp(`\\b${ref}\\b`,'g'),`this.#${ref}`);
-    return r;
+    for(const p of pv) reps.push([new RegExp(`\\b${p}\\b`,'g'), `this.#prop_${p}`]);
+    for(const v of cv) reps.push([new RegExp(`\\b${v}\\b`,'g'), `this.#${v}`]);
+    for(const e of en) reps.push([new RegExp(`\\b${e}\\(`,'g'), `this.#emit_${e}(`]);
+    for(const f of fn) reps.push([new RegExp(`\\b${f}\\(`,'g'), `this.#${f}(`]);
+    for(const ref of rn) reps.push([new RegExp(`\\b${ref}\\b`,'g'), `this.#${ref}`]);
+    return txSafe(expr, reps);
   }
 
   function elStr(n,indent,loopCtx){
@@ -453,15 +522,16 @@ function generate(c) {
       r = r.replace(new RegExp(`\\b${loopCtx.index}\\b`, 'g'), '__idx');
     }
     // Now apply normal transforms (but skip loop variables)
+    const reps = [];
     for(const s of sv) {
       if (s === loopCtx.each || s === loopCtx.index) continue;
-      r=r.replace(new RegExp(`\\b${s}\\b`,'g'),`this.#${s}`);
+      reps.push([new RegExp(`\\b${s}\\b`,'g'), `this.#${s}`]);
     }
-    for(const p of pv) r=r.replace(new RegExp(`\\b${p}\\b`,'g'),`this.#prop_${p}`);
-    for(const v of cv) r=r.replace(new RegExp(`\\b${v}\\b`,'g'),`this.#${v}`);
-    for(const e of en) r=r.replace(new RegExp(`\\b${e}\\(`,'g'),`this.#emit_${e}(`);
-    for(const f of fn) r=r.replace(new RegExp(`\\b${f}\\(`,'g'),`this.#${f}(`);
-    return r;
+    for(const p of pv) reps.push([new RegExp(`\\b${p}\\b`,'g'), `this.#prop_${p}`]);
+    for(const v of cv) reps.push([new RegExp(`\\b${v}\\b`,'g'), `this.#${v}`]);
+    for(const e of en) reps.push([new RegExp(`\\b${e}\\(`,'g'), `this.#emit_${e}(`]);
+    for(const f of fn) reps.push([new RegExp(`\\b${f}\\(`,'g'), `this.#${f}(`]);
+    return txSafe(r, reps);
   }
 
   const cn=tagToClass(c.meta.name||'x-component'),tn=c.meta.name||'x-component',sh=c.meta.shadow||'open',us=sh!=='none',root=us?'this.#shadow':'this';
@@ -483,6 +553,13 @@ function generate(c) {
   o+=`  constructor() {\n    super();\n`;if(us)o+=`    this.#shadow = this.attachShadow({ mode: '${sh}' });\n`;o+=`  }\n\n`;
   o+=`  connectedCallback() {\n    this.#render();\n    this.#bindEvents();\n`;for(const d of c.script)if(d.kind==='lifecycle'&&d.event==='mount')o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;o+=`  }\n\n`;
   o+=`  disconnectedCallback() {\n    this.#listeners.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));\n    this.#listeners = [];\n`;for(const d of c.script)if(d.kind==='lifecycle'&&d.event==='unmount')o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;o+=`  }\n\n`;
+  // adoptedCallback
+  const adoptHooks = c.script.filter(d => d.kind==='lifecycle' && d.event==='adopt');
+  if (adoptHooks.length > 0) {
+    o+=`  adoptedCallback() {\n`;
+    for(const d of adoptHooks) o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;
+    o+=`  }\n\n`;
+  }
 
   // attributeChangedCallback
   if(pv.length) {
@@ -500,6 +577,19 @@ function generate(c) {
   for(const d of c.script)if(d.kind==='emit'){const opts=d.options||{bubbles:true,composed:true};o+=`  #emit_${d.name}(detail) {\n    this.dispatchEvent(new CustomEvent('${d.name}', { detail, bubbles: ${opts.bubbles}, composed: ${opts.composed} }));\n  }\n\n`;}
   for(const d of c.script)if(d.kind==='fn'){const ak=d.async?'async ':'',ps=d.params.map(p=>p.name).join(', ');o+=`  ${ak}#${d.name}(${ps}) {\n    ${tx(d.body).split('\n').join('\n    ')}\n  }\n\n`;}
   for(const d of c.script)if(d.kind==='watch')o+=`  #watch_${d.deps.join('_')}() {\n    ${tx(d.body).split('\n').join('\n    ')}\n  }\n\n`;
+  // Generate previous-value fields for watch dependencies
+  const watchDecls = c.script.filter(d => d.kind === 'watch');
+  if (watchDecls.length > 0) {
+    const allWatchedDeps = new Set();
+    for (const w of watchDecls) w.deps.forEach(d => allWatchedDeps.add(d));
+    for (const dep of allWatchedDeps) {
+      const stateDecl = c.script.find(d => d.kind === 'state' && d.name === dep);
+      if (stateDecl) {
+        o += `  #__prev_${dep} = ${stateDecl.init};\n`;
+      }
+    }
+    o += '\n';
+  }
 
   // #render - uses template + innerHTML for proper custom element upgrade
   o+=`  #render() {\n`;
@@ -520,9 +610,26 @@ function generate(c) {
   o+=`  #update() {\n`;
   o+=`    this.#listeners.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));\n`;
   o+=`    this.#listeners = [];\n`;
+  // Check watch deps before re-render
+  for(const d of c.script) {
+    if (d.kind==='watch') {
+      const depChecks = d.deps.map(dep => `this.#${dep} !== this.#__prev_${dep}`).join(' || ');
+      o+=`    const __watchFire_${d.deps.join('_')} = ${depChecks};\n`;
+    }
+  }
   o+=`    this.#render();\n`;
   o+=`    this.#bindEvents();\n`;
-  for(const d of c.script)if(d.kind==='watch')o+=`    this.#watch_${d.deps.join('_')}();\n`;
+  for(const d of c.script) {
+    if (d.kind==='watch') {
+      const depsKey = d.deps.join('_');
+      o+=`    if (__watchFire_${depsKey}) {\n`;
+      o+=`      this.#watch_${depsKey}();\n`;
+      for (const dep of d.deps) {
+        o+=`      this.#__prev_${dep} = this.#${dep};\n`;
+      }
+      o+=`    }\n`;
+    }
+  }
   o+=`  }\n\n`;
 
   // #updateKeepFocus - re-render but preserve focus on :bind inputs
