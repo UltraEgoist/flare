@@ -1,5 +1,5 @@
 # OS
-.DS_Store
+**/.DS_Store
 
 # Build output
 dist/
@@ -13,6 +13,7 @@ flare-compiler-rust/target/
 
 # Reports / generated docs
 *.docx
+*.xlsx
 
 # Test artifacts
 examples/src/components/security-test.flare
