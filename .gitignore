@@ -10,3 +10,9 @@ node_modules/
 
 # Rust
 flare-compiler-rust/target/
+
+# Reports / generated docs
+*.docx
+
+# Test artifacts
+examples/src/components/security-test.flare
