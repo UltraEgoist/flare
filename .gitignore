@@ -2,6 +2,7 @@
 .DS_Store
 
 # Build output
+dist/
 examples/dist/
 
 # Node
