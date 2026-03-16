@@ -791,8 +791,11 @@ function parseElement(html,pos){
  */
 function parseAttrs(str){
   const attrs=[];
-  // Regex matches: optional prefix (:, @) + name + optional modifiers + optional value
-  const re=/([:\@]?[\w\-\.]+(?:\|[\w]+)*)(?:\s*=\s*"([^"]*)")?/g;
+  // Fixed regex to prevent ReDoS: limit pipe modifiers to max 10 to prevent catastrophic backtracking
+  // Original regex: /([:\@]?[\w\-\.]+(?:\|[\w]+)*)(?:\s*=\s*"([^"]*)")?/g
+  // Issue: nested quantifiers with (?: ... )* could cause exponential backtracking
+  // Fix: use {0,10} to limit modifier count instead of *
+  const re=/([:\@]?[\w\-\.]+(?:\|[\w]+){0,10})(?:\s*=\s*"([^"]*)")?/g;
   let m;
   while((m=re.exec(str))!==null){
     let name=m[1],
@@ -805,8 +808,13 @@ function parseAttrs(str){
         spread=false;   // :...name directive
 
     // Parse modifiers (attached with |) from name
-    const parts=name.split('|'),
-          modifiers=parts.slice(1);
+    const parts=name.split('|');
+    // Safety check: limit modifier count to prevent DoS attacks
+    if(parts.length>11) {
+      // Truncate to max 10 modifiers (1 name + 10 modifiers = 11 parts)
+      parts.length=11;
+    }
+    const modifiers=parts.slice(1);
     name=parts[0];
 
     // Directive detection
@@ -1076,6 +1084,8 @@ class TypeChecker {
   }
   checkTemplate(nodes){for(const n of nodes){if(n.kind==='interpolation')this.checkInterp(n);else if(n.kind==='element'){n.attrs.forEach(a=>{
     if(a.dynamic||a.bind)this.checkVars(a.value);
+    // S-17: Validate event handler expressions to prevent code injection
+    if(a.event)this.validateEventHandlerAttr(a);
     // Security: warn about @html usage
     if(a.html)this.diags.push({level:'warning',code:'W0201',message:`@html はエスケープされません。XSSリスクがあるため、信頼できるデータのみ使用してください`});
     // Security: warn about dynamic href/src (potential javascript: URL injection)
@@ -1095,6 +1105,55 @@ class TypeChecker {
     // Strip string literals before extracting identifiers
     const stripped=expr.replace(/"(?:[^"\\]|\\.)*"/g,' ').replace(/'(?:[^'\\]|\\.)*'/g,' ').replace(/`(?:[^`\\]|\\.)*`/g,' ');
     const ids=stripped.match(/\b[a-zA-Z_]\w*\b/g)||[];for(const id of ids){if(reserved.has(id)||this.typeAliases.has(id))continue;if(!this.symbols.has(id)){const sug=this.similar(id);this.diags.push({level:'error',code:'E0301',message:`未定義の識別子 '${id}'`,hint:sug?`'${sug}' のことですか？`:undefined});}}}
+  // S-17: Validate event handler attributes for code injection attacks
+  validateEventHandlerAttr(attr) {
+    const expr = attr.value.trim();
+    // Reject empty
+    if (!expr) {
+      this.diags.push({level:'error',code:'E0401',message:`Event handler cannot be empty`});
+      return;
+    }
+    // Reject keywords that indicate code execution
+    const dangerousKeywords = ['eval', 'Function(', 'constructor', '__proto__', 'prototype'];
+    for (const keyword of dangerousKeywords) {
+      if (expr.toLowerCase().includes(keyword.toLowerCase())) {
+        this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain "${keyword}"`});
+        return;
+      }
+    }
+    // Reject multiple statements (semicolon)
+    if (expr.includes(';')) {
+      this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain multiple statements (semicolon)`});
+      return;
+    }
+    // Reject string literals - these can hide malicious code
+    if (/['"`]/.test(expr)) {
+      this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain string literals`});
+      return;
+    }
+    // Reject template literals (backticks)
+    if (expr.includes('`')) {
+      this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain template literals`});
+      return;
+    }
+    // Reject comments
+    if (expr.includes('//') || expr.includes('/*')) {
+      this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain comments`});
+      return;
+    }
+    // Reject destructuring or spread
+    if (expr.includes('...') || expr.includes('[') || expr.includes(']')) {
+      this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain destructuring or spread operators`});
+      return;
+    }
+    // Reject regex literals
+    if (/\/.*\/[gimsuvy]*/.test(expr)) {
+      this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain regex literals`});
+      return;
+    }
+    // At this point, we allow simple identifiers, function calls, and assignments
+    // No further validation needed - this will be caught at code generation if invalid
+  }
   checkUnused(){const used=new Set();this.collectRefs(this.c.template,used);for(const d of this.c.script){if(d.kind==='computed')(d.expr.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='fn')(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='watch'){d.deps.forEach(dep=>used.add(dep));(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));}}for(const[name,sym]of this.symbols)if(sym.source==='state'&&!used.has(name))this.diags.push({level:'warning',code:'W0101',message:`state '${name}' が宣言されましたが使用されていません`});}
   collectRefs(nodes,refs){for(const n of nodes){if(n.kind==='interpolation')(n.expr.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));else if(n.kind==='element'){n.attrs.forEach(a=>{if(a.dynamic||a.event||a.bind)(a.value.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));});this.collectRefs(n.children,refs);}else if(n.kind==='if'){(n.condition.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.elseIfChain)for(const branch of n.elseIfChain){(branch.condition.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(branch.children,refs);}if(n.elseChildren)this.collectRefs(n.elseChildren,refs);}else if(n.kind==='for'){(n.of.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.emptyChildren)this.collectRefs(n.emptyChildren,refs);}}}
   infer(e){e=e.trim();if(/^-?\d+(\.\d+)?$/.test(e))return{kind:'primitive',name:'number'};if(/^["'`]/.test(e))return{kind:'primitive',name:'string'};if(e==='true'||e==='false')return{kind:'primitive',name:'boolean'};if(e==='null')return{kind:'primitive',name:'null'};if(e.startsWith('['))return{kind:'array',element:{kind:'primitive',name:'string'}};const sym=this.symbols.get(e);return sym?sym.type:null;}

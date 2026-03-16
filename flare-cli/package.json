@@ -1,18 +1,34 @@
 {
   "name": "@aspect/flare",
-  "version": "0.1.0",
-  "description": "Flare - テンプレートファーストのWeb Componentコンパイラ",
+  "version": "0.2.0",
+  "description": "Flare - Template-first Web Component compiler. Compiles .flare template files into JavaScript Web Components.",
+  "main": "lib/compiler.js",
   "bin": {
     "flare": "./bin/flare.js"
   },
   "files": [
     "bin/",
-    "lib/",
-    "template/"
+    "lib/"
   ],
-  "keywords": ["web-components", "compiler", "template", "custom-elements"],
+  "keywords": [
+    "web-components",
+    "compiler",
+    "template",
+    "custom-elements",
+    "flare-lang",
+    "javascript"
+  ],
+  "author": "Aspect",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aspect/flare.git"
+  },
+  "homepage": "https://github.com/aspect/flare#readme",
   "engines": {
     "node": ">=18.0.0"
   },
-  "license": "MIT"
+  "scripts": {
+    "test": "node --test test/compiler.test.js test/cli.test.js test/e2e.test.js"
+  }
 }

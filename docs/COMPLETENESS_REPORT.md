@@ -14,10 +14,10 @@
 | Rustコンパイラ | 40% | ビルドエラーあり（checker.rs修正済み、未検証） |
 | CLIツール | 80% | init/build/check/dev 動作確認済み |
 | VSCode拡張 | 65% | 構文ハイライト・補完・ホバー・スニペット対応 |
-| テストスイート | 75% | 160テスト（compiler 137 + CLI 23）、E2Eテスト未実装 |
-| セキュリティ | 80% | 13件の脆弱性修正済み、既知の残課題あり |
+| テストスイート | 90% | 216テスト（compiler 176 + E2E 17 + CLI 23） |
+| セキュリティ | 90% | 15件の脆弱性修正済み（S-14, S-17追加）、残3件 |
 | ドキュメント | 75% | API.md大幅拡充済み、チュートリアル不足 |
-| 本番運用準備 | 30% | npm publish未、SSR未、Source Map未 |
+| 本番運用準備 | 40% | npm publish準備済、SSR未、Source Map未 |
 
 ### 総合評価: **アルファ品質（Alpha）**
 
@@ -92,8 +92,8 @@
 | ID | 深刻度 | 内容 | 推奨対策 |
 |----|--------|------|----------|
 | S-16 | HIGH | txSafe() テンプレートリテラルのエッジケース | ファズテストで検証 |
-| S-17 | HIGH | イベントハンドラ式のコードインジェクション | 式のパース・検証を強化 |
-| S-14 | MEDIUM | parseAttrs() ReDoS | パイプの繰り返し回数を制限 |
+| ~~S-17~~ | ~~HIGH~~ | ~~イベントハンドラ式のコードインジェクション~~ | ✅ 修正済み（eval/Function/文字列リテラル等を禁止） |
+| ~~S-14~~ | ~~MEDIUM~~ | ~~parseAttrs() ReDoS~~ | ✅ 修正済み（修飾子上限10に制限） |
 | S-19 | MEDIUM | CSS セレクタインジェクション（.flareファイル自体が悪意ある場合） | CSPで緩和 |
 | S-22 | MEDIUM | dev server symlink TOCTOU | atomic file operations に移行 |
 
@@ -107,7 +107,7 @@
 
 ## 4. テストカバレッジ
 
-### 現在のテスト (160件)
+### 現在のテスト (216件)
 
 | カテゴリ | 件数 | カバー範囲 |
 |----------|------|-----------|
@@ -117,21 +117,24 @@
 | TypeChecker | 11 | シンボルテーブル、型不一致、未定義識別子、未使用state |
 | compile (基本) | 17 | HTMLElement継承、Shadow DOM、state/prop/computed/emit |
 | compile (エラー) | 4 | テンプレート欠損、不正構文 |
-| security | 14 | XSS、URL encode、name validation、CSP |
+| security | 14+22 | XSS、URL encode、name validation、CSP、S-14 ReDoS、S-17 ハンドラ式検証 |
 | slot | 3 | デフォルト、名前付き、フォールバック |
 | scoped css | 5 | 属性スコープ、:host変換、カンマセレクタ |
 | diff DOM | 12 | #getNewTree、#patch、属性差分、テキスト差分、shadow:none |
+| provide/consume | 17 | 基本宣言、型別、テンプレート統合、イベント構造 |
 | integration | 4 | 複合コンポーネント、有効JS出力 |
 | edge cases | 31 | 空値、深いネスト、大規模コンポーネント、修飾子 |
+| E2E テスト | 17 | DOM描画、リアクティビティ、prop、XSS防御、slot |
 | CLI | 23 | init、build、check、設定ファイル |
-| **合計** | **160** | |
+| **合計** | **216** | |
 
 ### 不足しているテスト
 
 | カテゴリ | 優先度 | 内容 |
 |----------|--------|------|
-| ブラウザE2Eテスト | HIGH | 実際のDOMでコンポーネントが動作するか検証 |
-| provide/consume | HIGH | コンテキスト共有の統合テスト |
+| ~~E2Eテスト~~ | ~~HIGH~~ | ✅ 軽量DOMシミュレーションで17件追加済み |
+| ~~provide/consume~~ | ~~HIGH~~ | ✅ コンテキスト共有の統合テスト17件追加済み |
+| ブラウザE2Eテスト (Playwright) | MEDIUM | 実ブラウザでの完全な動作検証（ユーザー実行推奨） |
 | dev server | MEDIUM | ライブリロード、ファイル監視のテスト |
 | パフォーマンステスト | MEDIUM | 大量コンポーネントのビルド時間、差分DOM更新速度 |
 | import 解決 | LOW | モジュール依存関係のテスト |

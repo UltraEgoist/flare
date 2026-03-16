@@ -2,28 +2,32 @@
 
 Flare 言語の全変更履歴です。
 
-## [Unreleased]
+## [0.2.0] - 2026-03-17
 
 ### Added
-- **差分DOM更新（Diff-based DOM Rendering）**: `#update()` でフル再レンダリングの代わりに morphdom-lite アルゴリズムによるDOM差分パッチを実装。既存のDOMノードを再利用し、変更箇所のみ更新することでパフォーマンスを改善。フォーカス・カーソル位置も自然に保持
-- **Scoped CSS**: `shadow: none` モード時に CSS セレクタを `[data-flare-scope="tag-name"]` でスコーピング。スタイル漏れを防止
-- **包括的テストスイート**: コンパイラテスト 100 件、CLI テスト 23 件（合計 123 件）
-- **コードコメント**: compiler.js, flare.js, extension.js に JSDoc コメントを追加（保守性向上）
-- **新規サンプルコンポーネント**: `x-card`（Slot デモ）、`x-tabs`（Scoped CSS + ループ）、`x-alert`（条件分岐 + Scoped CSS）
+- **差分DOM更新（Diff-based DOM Rendering）**: `#update()` でフル再レンダリングの代わりに morphdom-lite アルゴリズムによるDOM差分パッチを実装。フォーカス・カーソル位置も自然に保持
+- **Scoped CSS**: `shadow: none` モード時に CSS セレクタを `[data-flare-scope="tag-name"]` でスコーピング
+- **E2Eテストスイート**: 軽量DOMシミュレーションによるコンポーネント統合テスト 17 件を追加
+- **provide/consume 統合テスト**: コンテキスト共有の包括的テスト 17 件を追加
+- **VSCode スニペット**: `flare`（雛形）、`flare-minimal` を追加
+- **VSCode 属性補完**: 20+ の動的属性（`:placeholder`, `:for`, `:id` 等）とイベント補完を追加
+- **npm publish 準備**: package.json の bin/main/files/engines 設定、.npmignore 作成
+- **包括的テストスイート**: 合計 216 件（compiler 176 + E2E 17 + CLI 23）
 
 ### Security
-- **S-01**: `scopeCss()` で tagName をサニタイズし CSS インジェクション防止
-- **S-02**: `escRx()` ヘルパーで RegExp メタ文字エスケープ
-- **S-03**: イベント名のサニタイズ（英数字+ハイフンのみ許可）
-- **S-04**: `#escUrl()` で URL デコード後にプロトコルチェック（エンコードバイパス防止）
-- **S-05**: コンポーネント名の Web Component 仕様準拠バリデーション
-- **S-06**: dev サーバー CSP から `unsafe-eval` を除去
-- **S-07**: `isInString()` でバックスラッシュエスケープを正しく処理
-- **S-08**: `txSafe()` テンプレートリテラル `${}` 内の文字列を正しく処理
-- **S-09**: watch 依存キーをサニタイズ（有効なJS識別子に変換）
-- **S-10**: パーサーエラーを型チェック前に収集し、診断情報として報告
+- **S-01〜S-10**: XSS防御、URL検証、名前バリデーション等 10 件修正
+- **S-11**: `#escAttr` の fast-path で改行チェック漏れを修正
+- **S-14**: `parseAttrs()` の ReDoS 脆弱性を修正（修飾子数上限を 10 に制限）
+- **S-17**: イベントハンドラ式のコードインジェクション防止（eval/Function/文字列リテラル等を禁止）
+- **S-23**: 多重URLデコードによるパストラバーサルを防止
+- **S-27**: 動的 `on*` イベントハンドラ属性をブロック
 
 ### Fixed
+- **VSCode fn 解析**: `m[3]` 参照エラーにより全 fn 宣言が未登録になるバグを修正
+- **VSCode ホバー**: `<script>` 内の `prop name` に `<meta>` タグのドキュメントが表示される問題を修正（ブロックコンテキスト検出を追加）
+- **動的属性の重複**: `:bind` と `:value` が同一要素にある場合の `value` 属性重複を防止
+- **ループ内 prop 変換**: `txLoop()` でループ変数と同名の prop/computed/ref が誤変換される問題を修正
+- **自動命名**: ファイル名にハイフンが含まれる場合 `x-` プレフィックスを付与しない（`sample-test.flare` → `sample-test`）
 - `test` スクリプトから存在しない `test-bugs.js` への参照を削除
 
 ---

