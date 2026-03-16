@@ -2263,7 +2263,9 @@ function compile(source, fileName, options) {
 
   // Auto-generate component name from filename if not specified
   if(!meta.name) {
-    meta.name='x-'+fileName.replace(/\.flare$/,'').replace(/([A-Z])/g,'-$1').toLowerCase();
+    const base = fileName.replace(/\.flare$/,'').replace(/([A-Z])/g,'-$1').toLowerCase().replace(/^-/,'');
+    // ファイル名にハイフンが含まれていればそのまま使用、なければ x- を付与
+    meta.name = base.includes('-') ? base : 'x-' + base;
   }
 
   // S-05: Validate component name per Web Component spec
