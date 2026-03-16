@@ -195,7 +195,7 @@ Features:
 
 - [x] TypeScript output (`--target ts` with `.d.ts` generation)
 - [x] Scoped CSS for `shadow: none` mode
-- [x] Comprehensive test suite (216 tests)
+- [x] Comprehensive test suite (233 tests)
 - [x] XSS protection (auto-escape for text, attributes, and URLs)
 - [x] Rust compiler implementation (experimental, in `flare-compiler-rust/`)
 - [ ] Language Server Protocol (LSP) for full TypeScript type checking inside `fn`

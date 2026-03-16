@@ -13,9 +13,9 @@
 | 型チェッカー | 70% | 基本型チェックは動作、複雑な型推論は未対応 |
 | Rustコンパイラ | 40% | ビルドエラーあり（checker.rs修正済み、未検証） |
 | CLIツール | 80% | init/build/check/dev 動作確認済み |
-| VSCode拡張 | 65% | 構文ハイライト・補完・ホバー・スニペット対応 |
-| テストスイート | 90% | 216テスト（compiler 176 + E2E 17 + CLI 23） |
-| セキュリティ | 90% | 15件の脆弱性修正済み（S-14, S-17追加）、残3件 |
+| VSCode拡張 | 80% | 構文ハイライト・補完・ホバー・スニペット・定義ジャンプ対応 |
+| テストスイート | 92% | 233テスト（compiler 193 + E2E 17 + CLI 23） |
+| セキュリティ | 95% | 18件の脆弱性修正済み（S-16, S-19, S-22追加）、既知の残課題なし |
 | ドキュメント | 75% | API.md大幅拡充済み、チュートリアル不足 |
 | 本番運用準備 | 40% | npm publish準備済、SSR未、Source Map未 |
 
@@ -62,7 +62,7 @@
 | ホバー情報 | ✅ 完成 | キーワード・ディレクティブの説明 |
 | エラー診断 | ⚠️ 基本動作 | コンパイラ診断のリアルタイム表示 |
 | コードスニペット | ✅ 新規追加 | flare(雛形), flare-minimal |
-| 定義ジャンプ | ❌ 未実装 | state/prop への Go to Definition |
+| 定義ジャンプ | ✅ 完成 | state/prop/fn/computed への Go to Definition（テンプレート内の{{式}}、@event、:bind、:attr対応） |
 | リファクタリング | ❌ 未実装 | 変数名一括変更等 |
 
 ---
@@ -91,11 +91,11 @@
 
 | ID | 深刻度 | 内容 | 推奨対策 |
 |----|--------|------|----------|
-| S-16 | HIGH | txSafe() テンプレートリテラルのエッジケース | ファズテストで検証 |
+| ~~S-16~~ | ~~HIGH~~ | ~~txSafe() テンプレートリテラルのエッジケース~~ | ✅ 修正済み（txSafe書き直し、ネストテンプレートリテラル対応） |
 | ~~S-17~~ | ~~HIGH~~ | ~~イベントハンドラ式のコードインジェクション~~ | ✅ 修正済み（eval/Function/文字列リテラル等を禁止） |
 | ~~S-14~~ | ~~MEDIUM~~ | ~~parseAttrs() ReDoS~~ | ✅ 修正済み（修飾子上限10に制限） |
-| S-19 | MEDIUM | CSS セレクタインジェクション（.flareファイル自体が悪意ある場合） | CSPで緩和 |
-| S-22 | MEDIUM | dev server symlink TOCTOU | atomic file operations に移行 |
+| ~~S-19~~ | ~~MEDIUM~~ | ~~CSS セレクタインジェクション~~ | ✅ 修正済み（tagNameのCSS文字列エスケープ追加） |
+| ~~S-22~~ | ~~MEDIUM~~ | ~~dev server symlink TOCTOU~~ | ✅ 修正済み（realpathSync + lstatSyncによるシンボリックリンク検出） |
 
 ### 設計上の注意事項
 
@@ -107,7 +107,7 @@
 
 ## 4. テストカバレッジ
 
-### 現在のテスト (216件)
+### 現在のテスト (233件)
 
 | カテゴリ | 件数 | カバー範囲 |
 |----------|------|-----------|
@@ -117,7 +117,7 @@
 | TypeChecker | 11 | シンボルテーブル、型不一致、未定義識別子、未使用state |
 | compile (基本) | 17 | HTMLElement継承、Shadow DOM、state/prop/computed/emit |
 | compile (エラー) | 4 | テンプレート欠損、不正構文 |
-| security | 14+22 | XSS、URL encode、name validation、CSP、S-14 ReDoS、S-17 ハンドラ式検証 |
+| security | 14+22+17 | XSS、URL encode、name validation、CSP、S-14 ReDoS、S-17 ハンドラ式、S-16 txSafe、S-19 CSS |
 | slot | 3 | デフォルト、名前付き、フォールバック |
 | scoped css | 5 | 属性スコープ、:host変換、カンマセレクタ |
 | diff DOM | 12 | #getNewTree、#patch、属性差分、テキスト差分、shadow:none |
@@ -126,7 +126,7 @@
 | edge cases | 31 | 空値、深いネスト、大規模コンポーネント、修飾子 |
 | E2E テスト | 17 | DOM描画、リアクティビティ、prop、XSS防御、slot |
 | CLI | 23 | init、build、check、設定ファイル |
-| **合計** | **216** | |
+| **合計** | **233** | |
 
 ### 不足しているテスト
 

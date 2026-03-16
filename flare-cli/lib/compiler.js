@@ -1385,39 +1385,114 @@ function generate(c, options) {
    */
   function txSafe(expr, replacements) {
     // Partition expression into string and non-string regions
+    // For template literals, further partition to separate ${}  expressions
     const parts = [];
     let i = 0;
+
+    // Helper: Parse a template literal and return its parts
+    function scanTemplateLiteral(expr, startIdx) {
+      const tplParts = [];
+      let j = startIdx + 1; // Skip opening backtick
+      let lastPartEnd = startIdx + 1; // End of last text part
+
+      while (j < expr.length) {
+        if (expr[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (expr[j] === '`') {
+          // End of template literal
+          if (lastPartEnd < j) {
+            tplParts.push({ text: expr.substring(lastPartEnd, j), isString: true });
+          }
+          return { endIdx: j + 1, parts: tplParts };
+        }
+
+        // Check for ${...} expression
+        if (expr[j] === '$' && expr[j+1] === '{') {
+          // Save the string part before ${
+          if (lastPartEnd < j) {
+            tplParts.push({ text: expr.substring(lastPartEnd, j), isString: true });
+          }
+
+          // Find matching }
+          let depth = 1;
+          j += 2;
+          const exprStart = j;
+
+          while (j < expr.length && depth > 0) {
+            if (expr[j] === '\\') { j += 2; continue; }
+            // Handle strings/template literals inside ${}
+            if (expr[j] === '"' || expr[j] === "'" || expr[j] === '`') {
+              const q = expr[j];
+              j++;
+              while (j < expr.length) {
+                if (expr[j] === '\\') { j += 2; continue; }
+                if (expr[j] === q) { j++; break; }
+                j++;
+              }
+              continue;
+            }
+            if (expr[j] === '{') depth++;
+            else if (expr[j] === '}') depth--;
+            if (depth > 0) j++;
+          }
+
+          const exprText = expr.substring(exprStart, j);
+          tplParts.push({ text: exprText, isString: false, isExpr: true });
+
+          if (j < expr.length) j++; // Skip closing }
+          lastPartEnd = j;
+          continue;
+        }
+
+        j++;
+      }
+
+      // Malformed: unclosed template literal
+      if (lastPartEnd < expr.length) {
+        tplParts.push({ text: expr.substring(lastPartEnd), isString: true });
+      }
+      return { endIdx: expr.length, parts: tplParts };
+    }
+
     while (i < expr.length) {
       const ch = expr[i];
-      if (ch === '"' || ch === "'" || ch === '`') {
-        // String literal: find matching close quote (handle escapes)
+
+      if (ch === '`') {
+        // Template literal: partition into string and expression parts
+        const { endIdx, parts: tplParts } = scanTemplateLiteral(expr, i);
+
+        // Add opening backtick
+        let templateContent = '`';
+
+        // Process each part of the template
+        for (const part of tplParts) {
+          if (part.isString) {
+            // String parts remain unchanged
+            templateContent += part.text;
+          } else if (part.isExpr) {
+            // Expression parts: apply replacements
+            let exprContent = part.text;
+            for (const [pattern, replacement] of replacements) {
+              exprContent = exprContent.replace(pattern, replacement);
+            }
+            templateContent += '${' + exprContent + '}';
+          }
+        }
+
+        // Add closing backtick
+        templateContent += '`';
+
+        parts.push({ text: templateContent, isString: true }); // Treat whole template as string
+        i = endIdx;
+      } else if (ch === '"' || ch === "'") {
+        // Regular string literal (not template): find matching close quote
         const quote = ch;
         let j = i + 1;
         while (j < expr.length) {
-          if (expr[j] === '\\') { j += 2; continue; }  // Escaped character
-          if (expr[j] === quote) { j++; break; }        // Found closing quote
-          // S-08: Template literals can contain ${...} expressions with nested strings
-          if (quote === '`' && expr[j] === '$' && expr[j+1] === '{') {
-            let depth = 1; j += 2;
-            while (j < expr.length && depth > 0) {
-              if (expr[j] === '\\') { j += 2; continue; }
-              // Skip over strings inside ${} to prevent } in strings from closing the expression
-              if (expr[j] === '"' || expr[j] === "'" || expr[j] === '`') {
-                const q = expr[j]; j++;
-                while (j < expr.length && expr[j] !== q) {
-                  if (expr[j] === '\\') j++;
-                  j++;
-                }
-                if (j < expr.length) j++; // skip closing quote
-                continue;
-              }
-              if (expr[j] === '{') depth++;
-              else if (expr[j] === '}') depth--;
-              if (depth > 0) j++;
-              else { j++; break; }
-            }
-            continue;
-          }
+          if (expr[j] === '\\') { j += 2; continue; }
+          if (expr[j] === quote) { j++; break; }
           j++;
         }
         parts.push({ text: expr.substring(i, j), isString: true });
@@ -1541,7 +1616,13 @@ function generate(c, options) {
    */
   function scopeCss(css, tagName) {
     // S-01: Sanitize tagName for CSS selector to prevent CSS injection
-    const safeName = tagName.replace(/[^a-z0-9\-]/g, '');
+    // S-19: Escape tagName value for use in CSS attribute selector to prevent CSS injection
+    // Even though tagName is validated, we add defense-in-depth by escaping
+    // Special characters in CSS strings: backslash (\), quotes ("), newline (\n), etc.
+    const safeName = tagName
+      .replace(/[^a-z0-9\-]/g, '') // Remove non-alphanumeric except hyphen
+      .replace(/\\/g, '\\\\')       // Escape backslashes first
+      .replace(/"/g, '\\"');        // Escape double quotes for CSS string context
     const scope = `[data-flare-scope="${safeName}"]`;
     // Split CSS into rules (respecting nested braces for @media etc.)
     const rules = [];
@@ -1574,6 +1655,11 @@ function generate(c, options) {
         if (sel.startsWith(':host(') && sel.endsWith(')')) {
           // :host(.active) → [data-flare-scope="x-card"].active
           return scope + sel.slice(6, -1);
+        }
+        // :host with pseudo-class or pseudo-element (e.g., :host.active, :host:hover)
+        if (sel.startsWith(':host')) {
+          const rest = sel.slice(5); // Remove ':host' prefix
+          return scope + rest;
         }
         // Already starts with scope? skip
         if (sel.startsWith('[data-flare-scope')) return sel;

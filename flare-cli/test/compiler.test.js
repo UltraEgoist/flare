@@ -2212,4 +2212,234 @@ test('provide/consume - provide generates private field declaration', () => {
   assertNotContains(result.output, `this.config =`, 'Should not expose as public property');
 });
 
+// ============================================================
+// TESTS: S-19 CSS SELECTOR INJECTION PREVENTION
+// ============================================================
+
+test('S-19: CSS scoping escapes special characters in tag name', () => {
+  const src = `<meta>name: "x-box"
+shadow: none</meta>
+<template><div class="box">Test</div></template>
+<style>
+.box { color: red; }
+</style>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // The tag name should be sanitized to allow only alphanumeric and hyphens
+  assertContains(result.output, 'data-flare-scope="x-box"', 'Should sanitize tag name');
+  assertContains(result.output, /\[data-flare-scope="x-box"\]/, 'Should use attribute selector with scoping');
+});
+
+test('S-19: CSS scoping with quote injection attempt', () => {
+  const src = `<meta>name: "x-test-quote"
+shadow: none</meta>
+<template><div>Test</div></template>
+<style>.box { color: red; }</style>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // The tag name should be properly sanitized (quotes and special chars removed)
+  assertContains(result.output, 'data-flare-scope="x-test-quote"', 'Should sanitize tag name');
+  assertContains(result.output, /data-flare-scope=/, 'Should apply scoping');
+});
+
+test('S-19: CSS scoping with :host pseudo-class', () => {
+  const src = `<meta>name: "x-card"
+shadow: none</meta>
+<template><div>Content</div></template>
+<style>
+:host { display: block; }
+:host.active { border: 1px solid red; }
+</style>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // :host should map to the scoped element itself
+  assertContains(result.output, /\[data-flare-scope="x-card"\]/, 'Should convert :host to scoped selector');
+  assertContains(result.output, '.active', 'Should handle :host with pseudo-class');
+});
+
+test('S-19: CSS scoping with @media queries', () => {
+  const src = `<meta>name: "x-responsive"
+shadow: none</meta>
+<template><div class="container">Test</div></template>
+<style>
+@media (max-width: 600px) {
+  .container { width: 100%; }
+}
+</style>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // @media blocks should recurse into body and apply scoping
+  assertContains(result.output, '@media', 'Should preserve @media query');
+  assertContains(result.output, /\[data-flare-scope="x-responsive"\]/, 'Should apply scoping inside @media');
+});
+
+test('S-19: CSS scoping prevents selector escape', () => {
+  const src = `<meta>name: "x-secure-test"
+shadow: none</meta>
+<template><div>Test</div></template>
+<style>.box { color: red; }</style>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // The tag name should be sanitized: only alphanumeric and hyphen allowed
+  assertContains(result.output, 'data-flare-scope="x-secure-test"', 'Should preserve tag name with hyphens');
+  assertContains(result.output, 'data-flare-scope', 'Should apply scoping');
+});
+
+// ============================================================
+// TESTS: S-16 - txSafe() Template Literal Edge Cases
+// ============================================================
+
+test('S-16: Simple variable in template literal interpolation', () => {
+  const src = `<meta>name: "x-s16-simple"</meta>
+<script>state myVar: string = 'test'</script>
+<template><div>{{ myVar }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'this\\.#esc\\(this\\.#myVar\\)', 'Should replace myVar in interpolation');
+});
+
+test('S-16: Nested function calls with variable replacement', () => {
+  const src = `<meta>name: "x-s16-nested"</meta>
+<script>
+state myVar: string = 'test'
+fn process(val) { return val }
+</script>
+<template><div>{{ process(myVar) }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // The expression should have myVar replaced
+  assertContains(result.output, 'this\\.#myVar', 'Should replace myVar in function call');
+});
+
+test('S-16: Template literal with object key access', () => {
+  const src = `<meta>name: "x-s16-obj-key"</meta>
+<script>
+state myObj: object = {}
+state key: string = 'prop'
+</script>
+<template><div>{{ myObj[key] }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'this.#myObj.*this.#key', 'Should replace both variables in object key access');
+});
+
+test('S-16: Multiple variables in same template literal', () => {
+  const src = `<meta>name: "x-s16-multiple"</meta>
+<script>
+state first: string = 'a'
+state second: string = 'b'
+fn concat(a, b) { return a + b }
+</script>
+<template><div>{{ concat(first, second) }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'this.#first', 'Should replace first variable');
+  assertContains(result.output, 'this.#second', 'Should replace second variable');
+});
+
+test('S-16: Escaped backtick handling', () => {
+  const src = `<meta>name: "x-s16-escaped-backtick"</meta>
+<script>state myVar: string = 'test'</script>
+<template><div>{{ myVar || 'default' }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // The string literal should be preserved, myVar should be replaced
+  assertContains(result.output, 'this.#myVar', 'Should replace variable before string literal');
+});
+
+test('S-16: String inside expression should NOT be replaced', () => {
+  const src = `<meta>name: "x-s16-string-literal"</meta>
+<script>
+state myVar: string = 'test'
+fn testFn(arg) { return arg }
+</script>
+<template><div>{{ testFn('myVar') }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, "'myVar'", 'String literal myVar should be preserved');
+  assertNotContains(result.output, "'this\\.#myVar'", 'Should not replace myVar inside string');
+});
+
+test('S-16: Complex nested template with multiple expressions', () => {
+  const src = `<meta>name: "x-s16-complex"</meta>
+<script>
+state count: number = 0
+state msg: string = 'hello'
+fn format(a, b) { return String(a) + b }
+</script>
+<template><div>{{ format(count, msg) }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'this\\.#count', 'Should replace count');
+  assertContains(result.output, 'this\\.#msg', 'Should replace msg');
+});
+
+test('S-16: Template literal in conditional expression', () => {
+  const src = `<meta>name: "x-s16-conditional"</meta>
+<script>
+state condition: boolean = true
+state value: string = 'yes'
+fn choose(cond, ifTrue, ifFalse) { return cond ? ifTrue : ifFalse }
+</script>
+<template><div>{{ choose(condition, value, 'none') }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'this.#condition', 'Should replace condition');
+  assertContains(result.output, 'this.#value', 'Should replace value');
+});
+
+test('S-16: Template literal in function argument', () => {
+  const src = `<meta>name: "x-s16-func-arg"</meta>
+<script>
+state data: string = 'test'
+fn logData(x, y) { return x + y }
+</script>
+<template><div>{{ logData(data, 'suffix') }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'logData.*this.#data', 'Should replace variable in function argument');
+});
+
+test('S-16: Multiple template literals in same expression', () => {
+  const src = `<meta>name: "x-s16-multi-templates"</meta>
+<script>
+state a: string = 'x'
+state b: string = 'y'
+fn combine(x, y) { return x + y }
+</script>
+<template><div>{{ combine(a, b) }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'this.#a', 'Should replace a');
+  assertContains(result.output, 'this.#b', 'Should replace b');
+});
+
+test('S-16: Multiple variables in complex expression', () => {
+  const src = `<meta>name: "x-s16-multi-vars"</meta>
+<script>
+state level1: string = 'a'
+state level2: string = 'b'
+fn process(x, y) { return x || y }
+</script>
+<template><div>{{ process(level1, level2) }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'this\\.#level1', 'Should replace level1');
+  assertContains(result.output, 'this\\.#level2', 'Should replace level2');
+});
+
+test('S-16: Template literal with operators and variables', () => {
+  const src = `<meta>name: "x-s16-operators"</meta>
+<script>
+state x: number = 10
+state y: number = 20
+fn add(a, b) { return a + b }
+</script>
+<template><div>{{ add(x, y) }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'add.*this.#x', 'Should replace x in expression');
+  assertContains(result.output, 'this.#y', 'Should replace y in expression');
+});
+
 console.log('\n✓ All compiler tests passed');

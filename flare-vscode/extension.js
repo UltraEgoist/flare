@@ -73,6 +73,10 @@ const documentHashes = new Map();
  * @returns {void}
  */
 function activate(context) {
+  // 拡張ロード時にキャッシュをクリア（更新後のリロードで古い診断が残るのを防止）
+  documentHashes.clear();
+  documentSymbols.clear();
+
   // 診断コレクションを作成し、拡張機能がクリーンアップ時に自動処理するよう登録
   diagnosticCollection = vscode.languages.createDiagnosticCollection('flare');
   context.subscriptions.push(diagnosticCollection);
@@ -501,17 +505,138 @@ function provideCompletionItems(document, position) {
  */
 function provideDefinition(document, position) {
   const line = document.lineAt(position).text;
+  const col = position.character;
+  const uri = document.uri.toString();
+  const syms = documentSymbols.get(uri);
+
+  if (!syms) return null;
+
   // ── 単語範囲の取得 ──
   const wordRange = document.getWordRangeAtPosition(position);
   if (!wordRange) return null;
 
   const word = document.getText(wordRange);
-  const uri = document.uri.toString();
-  const syms = documentSymbols.get(uri);
 
-  // ── シンボル表から検索 ──
-  // 見つかった場合は宣言行の位置を返す
-  if (syms && syms.has(word)) {
+  // ────────────────────────────────────────
+  // テンプレート内のコンテキストを検出して処理
+  // ────────────────────────────────────────
+
+  // 1. {{ 式 }} 内の変数参照の検出
+  // 例: {{ count }}  →  state count
+  const interpMatch = line.match(/\{\{\s*(.+?)\s*\}\}/g);
+  if (interpMatch) {
+    for (const match of interpMatch) {
+      const startIdx = line.indexOf(match);
+      const endIdx = startIdx + match.length;
+      if (col >= startIdx && col < endIdx) {
+        // カーソルが {{ }} 内にある
+        const expr = match.replace(/\{\{\s*|\s*\}\}/g, '').trim();
+
+        // 式から最初の識別子を抽出（例: "count" or "user.name" → "count" / "user"）
+        const idMatch = expr.match(/^(\w+)/);
+        if (idMatch) {
+          const id = idMatch[1];
+          if (syms.has(id)) {
+            const sym = syms.get(id);
+            return new vscode.Location(document.uri, new vscode.Position(sym.line, 0));
+          }
+        }
+        return null;
+      }
+    }
+  }
+
+  // 2. イベントハンドラ内の関数参照の検出
+  // 例: @click="increment"  →  fn increment()
+  //     @input="updateName"  →  fn updateName()
+  const eventMatch = line.match(/@(\w+(?:\|\w+)*)="([^"]*)"/g);
+  if (eventMatch) {
+    for (const match of eventMatch) {
+      const startIdx = line.indexOf(match);
+      const endIdx = startIdx + match.length;
+      if (col >= startIdx && col < endIdx) {
+        // カーソルが @event="..." 内にある
+        const handlerMatch = match.match(/@\w+(?:\|\w+)*="([^"]*)"/);
+        if (handlerMatch) {
+          const handler = handlerMatch[1].trim();
+          // 関数名を抽出（"count()" や "count" の形式）
+          const fnMatch = handler.match(/^(\w+)(?:\s*\()?/);
+          if (fnMatch) {
+            const fnName = fnMatch[1];
+            if (syms.has(fnName)) {
+              const sym = syms.get(fnName);
+              return new vscode.Location(document.uri, new vscode.Position(sym.line, 0));
+            }
+          }
+        }
+        return null;
+      }
+    }
+  }
+
+  // 3. :bind ディレクティブ内の変数参照の検出
+  // 例: :bind="userName"  →  state userName
+  const bindMatch = line.match(/:bind="([^"]*)"/g);
+  if (bindMatch) {
+    for (const match of bindMatch) {
+      const startIdx = line.indexOf(match);
+      const endIdx = startIdx + match.length;
+      if (col >= startIdx && col < endIdx) {
+        // カーソルが :bind="..." 内にある
+        const varMatch = match.match(/:bind="([^"]*)"/);
+        if (varMatch) {
+          const varName = varMatch[1].trim();
+          // 最初の識別子を抽出
+          const idMatch = varName.match(/^(\w+)/);
+          if (idMatch) {
+            const id = idMatch[1];
+            if (syms.has(id)) {
+              const sym = syms.get(id);
+              return new vscode.Location(document.uri, new vscode.Position(sym.line, 0));
+            }
+          }
+        }
+        return null;
+      }
+    }
+  }
+
+  // 4. 動的属性値（:value, :class, :style 等）の検出
+  // 例: :value="count"  →  state count
+  //     :class="activeClass"  →  state/computed activeClass
+  const dynamicAttrMatch = line.match(/:([\w-]+)="([^"]*)"/g);
+  if (dynamicAttrMatch) {
+    for (const match of dynamicAttrMatch) {
+      const startIdx = line.indexOf(match);
+      const endIdx = startIdx + match.length;
+      if (col >= startIdx && col < endIdx) {
+        // カーソルが :attr="..." 内にある
+        const valueMatch = match.match(/:[^=]+="\s*([^"]*?)\s*"/);
+        if (valueMatch) {
+          const value = valueMatch[1];
+          // 最初の識別子を抽出
+          const idMatch = value.match(/^(\w+)/);
+          if (idMatch) {
+            const id = idMatch[1];
+            if (syms.has(id)) {
+              const sym = syms.get(id);
+              return new vscode.Location(document.uri, new vscode.Position(sym.line, 0));
+            }
+          }
+        }
+        return null;
+      }
+    }
+  }
+
+  // ────────────────────────────────────────
+  // テンプレート外のコンテキスト
+  // （スクリプト内またはその他の場所）
+  // ────────────────────────────────────────
+
+  // 5. 単純なシンボルテーブル検索
+  // （テンプレート特有の構文でない場合）
+  if (syms.has(word)) {
     const sym = syms.get(word);
     return new vscode.Location(document.uri, new vscode.Position(sym.line, 0));
   }
@@ -847,6 +972,11 @@ function runDiagnostics(document) {
         // 関数名を抽出（"count = 0" や "fn(args)" のような式は無視）
         const fnName = handler.match(/^(\w+)$/)?.[1] || handler.match(/^(\w+)\s*\(/)?.[1];
         if (fnName && !symbols.has(fnName) && !handler.includes('=')) {
+          // フォールバック: scriptの生テキスト内に fn 宣言が存在するか確認
+          // （シンボルテーブル構築が何らかの理由で漏れた場合の安全策）
+          const scriptText = scriptBlock ? scriptBlock.content : '';
+          const fnDeclPattern = new RegExp(`\\bfn\\s+(?:async\\s+)?${fnName}\\s*\\(`);
+          if (fnDeclPattern.test(scriptText)) continue; // scriptに定義あり → 警告しない
           const col = em.index + em[1].length + 2; // @event=" の後
           diagnostics.push(mkDiag(docLine, col, docLine, col + handler.length,
             `イベントハンドラ '${fnName}' が <script> 内に定義されていません — fn ${fnName}() { ... } を追加してください`, 'warning'));

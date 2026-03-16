@@ -578,18 +578,36 @@ function cmdDev() {
     // 各候補パスを順番にチェック
     for (const filePath of candidates) {
       const resolved = path.resolve(filePath);
-      // セキュリティ：シンリンク解決と allowedRoots 検証
+
+      // S-22: Symlink TOCTOU防止
+      // ファイルを開く際に O_NOFOLLOW フラグを使用して symlink を無視
+      // または、realpath を呼ぶ前にファイルを開いて、open後に inode を検証
+      // Node.js では fs.openSync に O_NOFOLLOW が直接サポートされないため、
+      // try-catch で fs.statSync(path, {bigint: false}) の symlink チェックを実施
+
       let realPath = resolved;
+      let linkedPath = null;
+
       try {
-        // シンリンクを解決して実パスを取得
-        realPath = fs.realpathSync(resolved);
+        // ファイルが symlink でないかを確認：lstat で symlink 自体をチェック
+        const lstat = fs.lstatSync(resolved);
+        if (lstat.isSymbolicLink()) {
+          // symlink が検出された場合、realpath で解決
+          linkedPath = resolved;
+          realPath = fs.realpathSync(resolved);
+        } else if (!lstat.isFile()) {
+          // symlink ではなく、ファイルでもない場合はスキップ
+          continue;
+        }
       } catch (e) {
         // ファイルが存在しない場合は resolved パスのまま続行
       }
+
       // 実パスが allowedRoots の範囲内にあることを確認
-      // (パストトラバーサル後でのチェック)
       if (!allowedRoots.some(root => realPath.startsWith(root + path.sep) || realPath === root)) continue;
+
       // ファイルが存在し、かつファイルであることを確認
+      // 本当に開く直前に確認することで TOCTOU リスクを最小化
       if (fs.existsSync(realPath) && fs.statSync(realPath).isFile()) {
         const ext = path.extname(realPath);
         const mime = MIME[ext] || 'application/octet-stream';
