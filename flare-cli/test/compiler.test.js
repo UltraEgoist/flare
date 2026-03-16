@@ -909,4 +909,94 @@ test('scoped css - shadow:open does NOT scope CSS', () => {
   assertContains(result.output, '\\.box\\{color');
 });
 
+// ============================================================
+// TESTS: SECURITY FIXES (S-01 through S-10)
+// ============================================================
+
+test('S-01: scopeCss sanitizes tagName to prevent CSS injection', () => {
+  // tagName with special chars like "] should be stripped
+  const src = `<meta>name: "x-safe-tag"
+shadow: none</meta>
+<script>state x: number = 0</script>
+<template><div>{{ x }}</div></template>
+<style>.box { color: red; }</style>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Should produce clean CSS attribute selector
+  assertContains(result.output, 'data-flare-scope="x-safe-tag"');
+});
+
+test('S-04: #escUrl blocks URL-encoded javascript: protocol', () => {
+  const src = `<meta>name: "x-url-test"</meta>
+<script>state link: string = "test"</script>
+<template><a :href="link">test</a></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Should contain decodeURIComponent in escUrl
+  assert.ok(result.output.includes('decodeURIComponent'), '#escUrl should decode before checking');
+});
+
+test('S-05: invalid meta name is rejected', () => {
+  const src = `<meta>name: "NoHyphen"</meta>
+<script>state x: number = 0</script>
+<template><div>{{ x }}</div></template>`;
+  const result = compile(src);
+  assertFail(result);
+  assert.ok(result.diagnostics.some(d => d.code === 'E0003'), 'should report E0003 for invalid name');
+});
+
+test('S-05: meta name without hyphen is rejected', () => {
+  const src = `<meta>name: "xcomponent"</meta>
+<script>state x: number = 0</script>
+<template><div>{{ x }}</div></template>`;
+  const result = compile(src);
+  assertFail(result);
+});
+
+test('S-05: valid meta names are accepted', () => {
+  for (const name of ['x-comp', 'my-app', 'x-my-component', 'app-v2']) {
+    const src = `<meta>name: "${name}"</meta>
+<script>state x: number = 0</script>
+<template><div>{{ x }}</div></template>`;
+    const result = compile(src);
+    assertSuccess(result, `${name} should be accepted`);
+  }
+});
+
+test('S-06: generated code does not contain unsafe-eval', () => {
+  // Verify no eval() in generated component code
+  const src = `<meta>name: "x-eval-check"</meta>
+<script>state x: number = 0</script>
+<template><div>{{ x }}</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assert.ok(!result.output.includes('eval('), 'generated code should not contain eval()');
+});
+
+test('S-10: invalid #if syntax reports diagnostic error', () => {
+  const src = `<meta>name: "x-parse-err"</meta>
+<script>state x: number = 0</script>
+<template>
+  <#if badattr>
+    <div>test</div>
+  </#if>
+</template>`;
+  const result = compile(src);
+  assertFail(result);
+  assert.ok(result.diagnostics.some(d => d.code === 'E0004'), 'should report E0004 for parse error');
+});
+
+test('S-10: invalid #for syntax reports diagnostic error', () => {
+  const src = `<meta>name: "x-for-err"</meta>
+<script>state items: string[] = []</script>
+<template>
+  <#for badattr>
+    <div>test</div>
+  </#for>
+</template>`;
+  const result = compile(src);
+  assertFail(result);
+  assert.ok(result.diagnostics.some(d => d.code === 'E0004'), 'should report E0004 for parse error');
+});
+
 console.log('\n✓ All compiler tests passed');

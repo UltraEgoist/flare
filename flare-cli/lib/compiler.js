@@ -113,8 +113,13 @@ function isInString(s, pos) {
   let inStr = false,      // Are we currently inside a string?
       strChar = '';        // Which quote character opened the current string?
   for (let i = 0; i < pos; i++) {
-    // Check for quote characters (handle escapes with backslash)
-    if ((s[i] === '"' || s[i] === "'" || s[i] === '`') && s[i-1] !== '\\') {
+    // S-07: Skip escaped characters properly (handle \\", \\\", etc.)
+    if (s[i] === '\\' && inStr) {
+      i++; // Skip next character entirely (it's escaped)
+      continue;
+    }
+    // Check for quote characters
+    if (s[i] === '"' || s[i] === "'" || s[i] === '`') {
       if (!inStr) {
         // Entering a string
         inStr = true;
@@ -1332,11 +1337,21 @@ function generate(c, options) {
         while (j < expr.length) {
           if (expr[j] === '\\') { j += 2; continue; }  // Escaped character
           if (expr[j] === quote) { j++; break; }        // Found closing quote
-          // Special: template literals can contain ${...} expressions
+          // S-08: Template literals can contain ${...} expressions with nested strings
           if (quote === '`' && expr[j] === '$' && expr[j+1] === '{') {
-            // Track ${...} as code, not string (to allow replacements)
             let depth = 1; j += 2;
             while (j < expr.length && depth > 0) {
+              if (expr[j] === '\\') { j += 2; continue; }
+              // Skip over strings inside ${} to prevent } in strings from closing the expression
+              if (expr[j] === '"' || expr[j] === "'" || expr[j] === '`') {
+                const q = expr[j]; j++;
+                while (j < expr.length && expr[j] !== q) {
+                  if (expr[j] === '\\') j++;
+                  j++;
+                }
+                if (j < expr.length) j++; // skip closing quote
+                continue;
+              }
               if (expr[j] === '{') depth++;
               else if (expr[j] === '}') depth--;
               if (depth > 0) j++;
@@ -1386,6 +1401,9 @@ function generate(c, options) {
    *
    * @returns {Array<[RegExp, string]>} Replacement patterns
    */
+  // S-02: Escape RegExp metacharacters to prevent RegExp injection
+  function escRx(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
   function buildReplacements() {
     const reps = [];
     // Sort all identifiers by length (longest first) to prevent partial matches
@@ -1394,25 +1412,25 @@ function generate(c, options) {
     allIds.sort((a, b) => b.length - a.length);
 
     // State variables: myVar -> this.#myVar
-    for(const s of sv) reps.push([new RegExp(`(?<!#)\\b${s}\\b`,'g'), `this.#${s}`]);
+    for(const s of sv) reps.push([new RegExp(`(?<!#)\\b${escRx(s)}\\b`,'g'), `this.#${s}`]);
 
     // Props: title -> this.#prop_title (props stored in separate fields)
-    for(const p of pv) reps.push([new RegExp(`(?<!#)\\b${p}\\b`,'g'), `this.#prop_${p}`]);
+    for(const p of pv) reps.push([new RegExp(`(?<!#)\\b${escRx(p)}\\b`,'g'), `this.#prop_${p}`]);
 
     // Computed: doubled -> this.#doubled (calls private getter)
-    for(const v of cv) reps.push([new RegExp(`(?<!#)\\b${v}\\b`,'g'), `this.#${v}`]);
+    for(const v of cv) reps.push([new RegExp(`(?<!#)\\b${escRx(v)}\\b`,'g'), `this.#${v}`]);
 
     // Emit: emit(change) -> this.#emit_change( (calls emit method)
-    for(const e of en) reps.push([new RegExp(`(?<!#)\\b${e}\\(`,'g'), `this.#emit_${e}(`]);
+    for(const e of en) reps.push([new RegExp(`(?<!#)\\b${escRx(e)}\\(`,'g'), `this.#emit_${e}(`]);
 
     // Functions: increment() -> this.#increment() (calls private method)
-    for(const f of fn) reps.push([new RegExp(`(?<!#)\\b${f}\\(`,'g'), `this.#${f}(`]);
+    for(const f of fn) reps.push([new RegExp(`(?<!#)\\b${escRx(f)}\\(`,'g'), `this.#${f}(`]);
 
     // Refs: inputEl -> this.#inputEl (access private ref field)
-    for(const ref of rn) reps.push([new RegExp(`(?<!#)\\b${ref}\\b`,'g'), `this.#${ref}`]);
+    for(const ref of rn) reps.push([new RegExp(`(?<!#)\\b${escRx(ref)}\\b`,'g'), `this.#${ref}`]);
 
     // Consume: user -> this.#user (access consumed context value)
-    for(const co of cons) reps.push([new RegExp(`(?<!#)\\b${co}\\b`,'g'), `this.#${co}`]);
+    for(const co of cons) reps.push([new RegExp(`(?<!#)\\b${escRx(co)}\\b`,'g'), `this.#${co}`]);
 
     return reps;
   }
@@ -1463,7 +1481,9 @@ function generate(c, options) {
    * @returns {string} スコープ付きCSS
    */
   function scopeCss(css, tagName) {
-    const scope = `[data-flare-scope="${tagName}"]`;
+    // S-01: Sanitize tagName for CSS selector to prevent CSS injection
+    const safeName = tagName.replace(/[^a-z0-9\-]/g, '');
+    const scope = `[data-flare-scope="${safeName}"]`;
     // Split CSS into rules (respecting nested braces for @media etc.)
     const rules = [];
     let current = '';
@@ -1807,8 +1827,10 @@ function generate(c, options) {
           eventCounters[a.name] = count + 1;
           const fnName = count === 0 ? `fn_${a.name}` : `fn_${a.name}_${count}`;
           code += `      const ${fnName} = ${h};\n`;
-          code += `      el.addEventListener('${a.name}', ${fnName});\n`;
-          code += `      this.#listeners.push([el, '${a.name}', ${fnName}]);\n`;
+          // S-03: Sanitize event name to prevent code injection via template strings
+          const safeEvName = a.name.replace(/[^a-zA-Z0-9\-]/g, '');
+          code += `      el.addEventListener('${safeEvName}', ${fnName});\n`;
+          code += `      this.#listeners.push([el, '${safeEvName}', ${fnName}]);\n`;
         }
 
         for (const a of binding.binds) {
@@ -1846,10 +1868,12 @@ function generate(c, options) {
           // P1-17: Use counter suffix for duplicate event handlers
           const count = eventCounters[a.name] ?? 0;
           eventCounters[a.name] = count + 1;
-          const fnName = count === 0 ? `fn_${a.name}` : `fn_${a.name}_${count}`;
+          // S-03: Sanitize event name
+          const safeEvName2 = a.name.replace(/[^a-zA-Z0-9\-]/g, '');
+          const fnName = count === 0 ? `fn_${safeEvName2}` : `fn_${safeEvName2}_${count}`;
           code += `        const ${fnName} = ${h};\n`;
-          code += `        el.addEventListener('${a.name}', ${fnName});\n`;
-          code += `        this.#listeners.push([el, '${a.name}', ${fnName}]);\n`;
+          code += `        el.addEventListener('${safeEvName2}', ${fnName});\n`;
+          code += `        this.#listeners.push([el, '${safeEvName2}', ${fnName}]);\n`;
         }
 
         for (const a of binding.binds) {
@@ -2033,11 +2057,13 @@ function generate(c, options) {
   o+=`  #update() {\n`;
   o+=`    this.#listeners.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));\n`;
   o+=`    this.#listeners = [];\n`;
+  // S-09: Sanitize watch dep names for valid JS identifiers (e.g., "obj.x" → "obj_x")
+  function safeDepKey(deps) { return deps.map(d => d.replace(/[^a-zA-Z0-9_]/g, '_')).join('_'); }
   // Check watch deps before re-render
   for(const d of c.script) {
     if (d.kind==='watch') {
-      const depChecks = d.deps.map(dep => `this.#${dep} !== this.#__prev_${dep}`).join(' || ');
-      o+=`    const __watchFire_${d.deps.join('_')} = ${depChecks};\n`;
+      const depChecks = d.deps.map(dep => `this.#${dep.replace(/[^a-zA-Z0-9_]/g, '_')} !== this.#__prev_${dep.replace(/[^a-zA-Z0-9_]/g, '_')}`).join(' || ');
+      o+=`    const __watchFire_${safeDepKey(d.deps)} = ${depChecks};\n`;
     }
   }
   o+=`    this.#render();\n`;
@@ -2045,11 +2071,11 @@ function generate(c, options) {
   o+=`    this.#bindRefs();\n`;
   for(const d of c.script) {
     if (d.kind==='watch') {
-      const depsKey = d.deps.join('_');
+      const depsKey = safeDepKey(d.deps);
       o+=`    if (__watchFire_${depsKey}) {\n`;
       o+=`      this.#watch_${depsKey}();\n`;
       for (const dep of d.deps) {
-        o+=`      this.#__prev_${dep} = this.#${dep};\n`;
+        o+=`      this.#__prev_${dep.replace(/[^a-zA-Z0-9_]/g, '_')} = this.#${dep.replace(/[^a-zA-Z0-9_]/g, '_')};\n`;
       }
       o+=`    }\n`;
     }
@@ -2085,10 +2111,14 @@ function generate(c, options) {
   o+=`  }\n\n`;
 
   // #escUrl - URL sanitization (blocks javascript:, data:, vbscript:, blob:, file: URLs)
+  // S-04: Decode URL-encoded characters before protocol check to prevent bypass (e.g., java%73cript:)
   o+=`  #escUrl(val) {\n`;
   o+=`    if (val == null) return '';\n`;
   o+=`    const s = String(val).trim();\n`;
-  o+=`    if (/(javascript|data|vbscript|blob|file)\\s*:/i.test(s)) return 'about:blank';\n`;
+  o+=`    let decoded = s;\n`;
+  o+=`    try { decoded = decodeURIComponent(s); } catch(e) {}\n`;
+  o+=`    const normalized = decoded.replace(/[\\s\\x00-\\x1F]/g, '');\n`;
+  o+=`    if (/(javascript|data|vbscript|blob|file)\\s*:/i.test(normalized)) return 'about:blank';\n`;
   o+=`    return this.#escAttr(s);\n`;
   o+=`  }\n`;
 
@@ -2178,12 +2208,40 @@ function compile(source, fileName, options) {
     meta.name='x-'+fileName.replace(/\.flare$/,'').replace(/([A-Z])/g,'-$1').toLowerCase();
   }
 
+  // S-05: Validate component name per Web Component spec
+  // Must contain a hyphen, start with lowercase letter, no uppercase
+  if (!/^[a-z][a-z0-9]*(-[a-z0-9]+)+$/.test(meta.name)) {
+    return {
+      success: false,
+      diagnostics: [{
+        level: 'error',
+        code: 'E0003',
+        message: `無効なコンポーネント名 '${meta.name}': 小文字英数字とハイフンのみ使用可能で、ハイフンを1つ以上含む必要があります (例: "x-my-component")`
+      }]
+    };
+  }
+
   // Build AST
   const ast={meta,script,template,style,fileName};
+
+  // S-10: Collect parser error nodes from template AST and report as diagnostics
+  const parseErrors = [];
+  (function collectErrors(nodes) {
+    for (const n of nodes) {
+      if (n.kind === 'text' && typeof n.value === 'string' && n.value.startsWith('Error: ')) {
+        parseErrors.push({ level: 'error', code: 'E0004', message: `テンプレートパースエラー: ${n.value}` });
+      }
+      if (n.children) collectErrors(n.children);
+      if (n.elseChildren) collectErrors(n.elseChildren);
+      if (n.emptyChildren) collectErrors(n.emptyChildren);
+      if (n.elseIfChain) for (const b of n.elseIfChain) { if (b.children) collectErrors(b.children); }
+    }
+  })(template);
 
   // Phase 3: Type check
   const checker=new TypeChecker(ast);
   const diagnostics=checker.check();
+  diagnostics.push(...parseErrors);
 
   // Warn if unsupported features are used
   if(meta.extends) {

@@ -597,7 +597,7 @@ function cmdDev() {
           'Cache-Control': 'no-cache',  // 開発中はキャッシュさせない
           'X-Content-Type-Options': 'nosniff',  // MIME スニッフィング防止
           'Access-Control-Allow-Origin': '*',  // 開発時は全オリジンを許可
-          'Content-Security-Policy': "default-src 'self' 'unsafe-inline' 'unsafe-eval'",  // 開発時は動的実行を許可
+          'Content-Security-Policy': "default-src 'self' 'unsafe-inline'",  // S-06: unsafe-eval を除去
         });
         // ファイルをストリーム形式で送信（大きなファイルでもメモリ効率的）
         fs.createReadStream(realPath).pipe(res);
