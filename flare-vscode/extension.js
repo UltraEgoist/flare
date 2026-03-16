@@ -173,6 +173,35 @@ const HOVER = {
 };
 
 /**
+ * カーソル位置がどのブロック内にあるかを判定する
+ *
+ * .flare ファイルの4ブロック（meta, script, template, style）のうち
+ * どのブロックにカーソルがあるかを返します。
+ *
+ * @param {vscode.TextDocument} document - テキストドキュメント
+ * @param {number} lineNumber - カーソル行番号（0-based）
+ * @returns {'meta'|'script'|'template'|'style'|null} ブロック名
+ */
+function detectBlock(document, lineNumber) {
+  let currentBlock = null;
+  for (let i = 0; i <= lineNumber; i++) {
+    const t = document.lineAt(i).text.trim();
+    if (t === '<meta>' || t.startsWith('<meta ')) currentBlock = 'meta';
+    else if (t === '</meta>') currentBlock = null;
+    else if (t === '<script>' || t.startsWith('<script ')) currentBlock = 'script';
+    else if (t === '</script>') currentBlock = null;
+    else if (t === '<template>' || t.startsWith('<template ')) currentBlock = 'template';
+    else if (t === '</template>') currentBlock = null;
+    else if (t === '<style>' || t.startsWith('<style ')) currentBlock = 'style';
+    else if (t === '</style>') currentBlock = null;
+  }
+  return currentBlock;
+}
+
+// メタブロック専用キーワード — <script>内ではユーザー定義シンボルを優先
+const META_ONLY_HOVER_KEYS = new Set(['name', 'shadow']);
+
+/**
  * ホバードキュメントプロバイダー
  *
  * カーソル位置の単語に関する情報をマークダウン形式で表示します。
@@ -199,7 +228,19 @@ function provideHover(document, position) {
 
   // ── 直接マッチ（キーワード辞書） ──
   // HOVERオブジェクトにある標準キーワードの説明を返す
-  if (HOVER[word]) return mkHover(HOVER[word], wordRange);
+  // ただし 'name', 'shadow' 等のメタ専用キーワードは <meta> ブロック内でのみ表示
+  // <script> 内ではユーザー定義シンボル（prop name 等）を優先する
+  if (HOVER[word]) {
+    if (!META_ONLY_HOVER_KEYS.has(word)) {
+      return mkHover(HOVER[word], wordRange);
+    }
+    // メタ専用キーワードは <meta> ブロック内のみマッチ
+    const block = detectBlock(document, position.line);
+    if (block === 'meta') {
+      return mkHover(HOVER[word], wordRange);
+    }
+    // それ以外のブロックではフォールスルーしてユーザーシンボルを検索
+  }
 
   // ── @event ハンドラの動的説明 ──
   // @click|prevent のような修飾子付きイベントに対応
@@ -651,8 +692,8 @@ function runDiagnostics(document) {
       // P2-53: 複数行関数定義に対応
       // fn [async] name( ... )
       if ((m = line.match(/^fn\s+(async\s+)?(\w+)\s*\(/))) {
-        // 複数行に渡っている場合、次行を読み込んでパラメータを完成させる
-        let params = m[3] || '';
+        // 開き括弧以降のテキスト（同じ行の残り）を取得
+        let params = line.substring(m[0].length);
         let j = i;
         while (!params.includes(')') && j < lines.length - 1) {
           j++;
@@ -663,9 +704,6 @@ function runDiagnostics(document) {
           const paramsOnly = params.substring(0, closeParen).trim();
           symbols.set(m[2], { type: 'function', source: 'fn', line: docLine, async: !!m[1], params: paramsOnly, doc: jsDoc });
         }
-      } else if ((m = line.match(/^fn\s+(async\s+)?(\w+)\s*\(([^)]*)\)/))) {
-        // 単一行関数定義（括弧が同じ行にある）
-        symbols.set(m[2], { type: 'function', source: 'fn', line: docLine, async: !!m[1], params: m[3].trim(), doc: jsDoc });
       }
 
       // ── emit 宣言 ──

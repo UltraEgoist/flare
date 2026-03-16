@@ -1605,11 +1605,20 @@ function generate(c, options) {
       if (s === loopCtx.each || s === loopCtx.index) continue;
       reps.push([new RegExp(`\\b${s}\\b`,'g'), `this.#${s}`]);
     }
-    for(const p of pv) reps.push([new RegExp(`\\b${p}\\b`,'g'), `this.#prop_${p}`]);
-    for(const v of cv) reps.push([new RegExp(`\\b${v}\\b`,'g'), `this.#${v}`]);
+    for(const p of pv) {
+      if (p === loopCtx.each || p === loopCtx.index) continue;
+      reps.push([new RegExp(`\\b${p}\\b`,'g'), `this.#prop_${p}`]);
+    }
+    for(const v of cv) {
+      if (v === loopCtx.each || v === loopCtx.index) continue;
+      reps.push([new RegExp(`\\b${v}\\b`,'g'), `this.#${v}`]);
+    }
     for(const e of en) reps.push([new RegExp(`\\b${e}\\(`,'g'), `this.#emit_${e}(`]);
     for(const f of fn) reps.push([new RegExp(`\\b${f}\\(`,'g'), `this.#${f}(`]);
-    for(const ref of rn) reps.push([new RegExp(`\\b${ref}\\b`,'g'), `this.#${ref}`]);
+    for(const ref of rn) {
+      if (ref === loopCtx.each || ref === loopCtx.index) continue;
+      reps.push([new RegExp(`\\b${ref}\\b`,'g'), `this.#${ref}`]);
+    }
     return txSafe(expr, reps);
   }
 
@@ -1668,6 +1677,7 @@ function generate(c, options) {
       as += ` data-flare-id="${eid}-\${${loopCtx.index || '__idx'}}"`;
     }
 
+    const hasBind = n.attrs.some(a => a.bind);
     for(const a of n.attrs){
       if(a.event)continue;
       if(a.ref){as+=` data-ref="${a.value}"`;continue;}
@@ -1678,6 +1688,8 @@ function generate(c, options) {
       }
       if(a.html)continue;
       if(a.dynamic){
+        // :bind already generates value attr, skip duplicate :value
+        if(hasBind && a.name === 'value') continue;
         // Security: block dangerous on* event handler attributes (e.g., :onclick, :onmouseover)
         if(/^on[a-z]/i.test(a.name)) continue;
         const txExpr = loopCtx ? txLoop(a.value, loopCtx) : tx(a.value);
