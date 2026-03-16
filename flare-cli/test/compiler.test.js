@@ -1133,4 +1133,627 @@ test('diff - shadow:none mode uses correct root for patch', () => {
   assert.ok(result.output.includes('#patch(this,'), '#patch should use `this` as root for shadow:none');
 });
 
+// ============================================================
+// TESTS: EDGE CASES & RELIABILITY
+// ============================================================
+
+test('edge case - empty string defaults in state', () => {
+  const src = `<meta>name: "x-empty-defaults"</meta>
+<script>
+  state text: string = ""
+  state label: string = ""
+  state count: number = 0
+  state active: boolean = false
+</script>
+<template>
+  <div>{{ text }}</div>
+  <div>{{ label }}</div>
+  <span>{{ count }}</span>
+  <span>{{ active }}</span>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'text\\s*=\\s*""');
+  assertContains(result.output, 'count\\s*=\\s*0');
+  assertContains(result.output, 'active\\s*=\\s*false');
+});
+
+test('edge case - empty string defaults in props', () => {
+  const src = `<meta>name: "x-empty-props"</meta>
+<script>
+  prop title: string = ""
+  prop description: string = ""
+  prop maxLength: number = 0
+</script>
+<template>
+  <h1>{{ title }}</h1>
+  <p>{{ description }}</p>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'observedAttributes');
+  assertContains(result.output, "'title'");
+  assertContains(result.output, "'description'");
+});
+
+test('edge case - XSS nested quotes in interpolation', () => {
+  const src = `<meta>name: "x-nested-quotes"</meta>
+<script>
+  state text: string = "It\\'s \\"quoted\\""
+  state html: string = "<script>alert('xss')</script>"
+</script>
+<template>
+  <div>{{ text }}</div>
+  <p>{{ html }}</p>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, '#esc\\(');
+});
+
+test('edge case - XSS unicode escape sequences in interpolation', () => {
+  const src = `<meta>name: "x-unicode"</meta>
+<script>
+  state emoji: string = "\\u0048\\u0065\\u006c\\u006c\\u006f"
+  state rtl: string = "مرحبا"
+</script>
+<template>
+  <div>{{ emoji }}</div>
+  <p>{{ rtl }}</p>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, '#esc\\(');
+});
+
+test('edge case - special characters in interpolation expressions', () => {
+  const src = `<meta>name: "x-special-chars"</meta>
+<script>
+  state text: string = "hello\\nworld\\ttab"
+  state code: string = "backtick code"
+  state path: string = "C:\\\\Users\\\\test"
+</script>
+<template>
+  <div>{{ text }}</div>
+  <code>{{ code }}</code>
+  <span>{{ path }}</span>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - deep nesting: #if inside #for inside #if', () => {
+  const src = `<meta>name: "x-deep-nest"</meta>
+<script>
+  state outerShow: boolean = true
+  state items: string[] = ["a", "b"]
+  state innerShow: boolean = true
+</script>
+<template>
+  <#if condition="outerShow">
+    <div class="outer">
+      <#for each="item" of="items" key="item">
+        <#if condition="innerShow">
+          <span>{{ item }}</span>
+        </#if>
+      </#for>
+    </div>
+  </#if>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Verify ternary operators and map are generated
+  assertContains(result.output, /\?[^?]*:/);  // Ternary operator
+  assertContains(result.output, /\.map\(/);   // Map for loop
+});
+
+test('edge case - triple nested #if condition chains', () => {
+  const src = `<meta>name: "x-triple-if"</meta>
+<script>
+  state a: boolean = true
+  state b: boolean = false
+  state c: boolean = true
+</script>
+<template>
+  <#if condition="a">
+    <div>A</div>
+    <#if condition="b">
+      <div>B</div>
+      <#if condition="c">
+        <div>C</div>
+      </#if>
+    </#if>
+  </#if>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - multiple sibling #for loops with same variable names', () => {
+  const src = `<meta>name: "x-multi-for"</meta>
+<script>
+  state list1: string[] = ["a", "b"]
+  state list2: string[] = ["x", "y"]
+  state list3: string[] = ["1", "2"]
+</script>
+<template>
+  <div>
+    <#for each="item" of="list1" key="item">
+      <span>{{ item }}</span>
+    </#for>
+  </div>
+  <div>
+    <#for each="item" of="list2" key="item">
+      <span>{{ item }}</span>
+    </#for>
+  </div>
+  <div>
+    <#for each="item" of="list3" key="item">
+      <span>{{ item }}</span>
+    </#for>
+  </div>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Should generate three separate map() calls
+  const mapCount = (result.output.match(/\.map\(/g) || []).length;
+  assert(mapCount >= 3, 'Should have at least 3 map() calls for 3 loops');
+});
+
+test('edge case - special characters in prop defaults (quotes, angle brackets)', () => {
+  const src = `<meta>name: "x-special-props"</meta>
+<script>
+  prop title: string = "Title \\"quoted\\""
+  prop content: string = "<div>html</div>"
+  prop pattern: string = "<[^>]+>"
+  prop escape: string = "a\\\\b"
+</script>
+<template>
+  <h1>{{ title }}</h1>
+  <div>{{ content }}</div>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - single quotes in prop defaults', () => {
+  const src = `<meta>name: "x-single-quotes"</meta>
+<script>
+  prop msg: string = "It's working"
+  prop pattern: string = "can't stop"
+</script>
+<template>
+  <p>{{ msg }}</p>
+  <p>{{ pattern }}</p>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - large component stress test (many state vars)', () => {
+  let stateDecl = '';
+  for (let i = 0; i < 50; i++) {
+    stateDecl += `  state var${i}: number = ${i}\n`;
+  }
+  let templateContent = '';
+  for (let i = 0; i < 50; i++) {
+    templateContent += `  <span>{{ var${i} }}</span>\n`;
+  }
+  const src = `<meta>name: "x-large-state"</meta>
+<script>
+${stateDecl}
+</script>
+<template>
+${templateContent}
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  for (let i = 0; i < 50; i++) {
+    assertContains(result.output, `#var${i}`);
+  }
+});
+
+test('edge case - large component with many props', () => {
+  let propDecl = '';
+  for (let i = 0; i < 30; i++) {
+    propDecl += `  prop prop${i}: string = "default${i}"\n`;
+  }
+  const src = `<meta>name: "x-large-props"</meta>
+<script>
+${propDecl}
+</script>
+<template>
+  <div>Component with many props</div>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'observedAttributes');
+  for (let i = 0; i < 30; i++) {
+    assertContains(result.output, `'prop${i}'`);
+  }
+});
+
+test('edge case - event handler modifier combinations (@click|stopPropagation|preventDefault)', () => {
+  const src = `<meta>name: "x-modifiers"</meta>
+<script>
+  fn handleClick() { console.log("clicked") }
+  fn handleSubmit() { console.log("submitted") }
+  fn handleKey() { console.log("key") }
+</script>
+<template>
+  <button @click|stopPropagation="handleClick">Stop</button>
+  <button @click|preventDefault="handleClick">Prevent</button>
+  <form @submit|stopPropagation|preventDefault="handleSubmit">
+    <input @keydown|enter|shift="handleKey" />
+  </form>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'addEventListener');
+});
+
+test('edge case - inline expressions with special chars in event handlers', () => {
+  const src = `<meta>name: "x-inline-expr"</meta>
+<script>
+  state count: number = 0
+  fn increment() { count += 1 }
+  fn add(n: number) { count += n }
+</script>
+<template>
+  <button @click="add(5 + 3)">Add 8</button>
+  <button @click="add(-2)">Sub 2</button>
+  <button @click="count = count * 2; console.log(\\'doubled\\')">Double</button>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - template with only text, no elements', () => {
+  const src = `<meta>name: "x-text-only"</meta>
+<template>
+  Just plain text content here.
+  Multiple lines of text.
+  No HTML elements at all.
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'text');
+});
+
+test('edge case - template with text and whitespace, no elements', () => {
+  const src = `<meta>name: "x-text-ws"</meta>
+<script>state msg: string = "hello"</script>
+<template>
+Greeting: {{ msg }}
+
+More text here.
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - computed referencing another computed', () => {
+  const src = `<meta>name: "x-chained-computed"</meta>
+<script>
+  state x: number = 5
+  computed double: number = x * 2
+  computed quad: number = double * 2
+  computed hex: number = quad * 2
+</script>
+<template>
+  <span>{{ x }}</span>
+  <span>{{ double }}</span>
+  <span>{{ quad }}</span>
+  <span>{{ hex }}</span>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Should have getter definitions for all computed properties
+  assertContains(result.output, 'get #double');
+  assertContains(result.output, 'get #quad');
+  assertContains(result.output, 'get #hex');
+});
+
+test('edge case - computed with complex expression', () => {
+  const src = `<meta>name: "x-complex-computed"</meta>
+<script>
+  state a: number = 1
+  state b: number = 2
+  state c: number = 3
+  computed result: number = (a + b) * c - a / 2
+</script>
+<template>
+  <div>{{ result }}</div>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'get #result');
+});
+
+test('edge case - watch with multiple dependencies (simulated with separate watches)', () => {
+  const src = `<meta>name: "x-multi-watch"</meta>
+<script>
+  state a: number = 0
+  state b: number = 0
+  state c: number = 0
+  watch(a) { console.log("a changed") }
+  watch(b) { console.log("b changed") }
+  watch(c) { console.log("c changed") }
+</script>
+<template>
+  <div>{{ a }} {{ b }} {{ c }}</div>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - watch with nested path referencing', () => {
+  const src = `<meta>name: "x-watch-nested"</meta>
+<script>
+  state count: number = 0
+  watch(count) { console.log("count changed") }
+</script>
+<template>
+  <div>{{ count }}</div>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - shadow:closed mode output differs from open', () => {
+  const srcOpen = `<meta>name: "x-shadow-open"</meta>
+<template><div>test</div></template>`;
+  const srcClosed = `<meta>
+  name: "x-shadow-closed"
+  shadow: closed
+</meta>
+<template><div>test</div></template>`;
+
+  const resultOpen = compile(srcOpen);
+  const resultClosed = compile(srcClosed);
+
+  assertSuccess(resultOpen);
+  assertSuccess(resultClosed);
+
+  // Both should have shadow DOM
+  assertContains(resultOpen.output, 'attachShadow');
+  assertContains(resultClosed.output, 'attachShadow');
+
+  // Check mode difference
+  assertContains(resultOpen.output, "mode: 'open'");
+  assertContains(resultClosed.output, "mode: 'closed'");
+
+  // Output should be different
+  assert.notStrictEqual(resultOpen.output, resultClosed.output, 'open and closed modes should produce different output');
+});
+
+test('edge case - empty template (no content)', () => {
+  const src = `<meta>name: "x-empty-tpl"</meta>
+<template></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - template with only whitespace and comments', () => {
+  const src = `<meta>name: "x-whitespace-tpl"</meta>
+<template>
+
+
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - multiple event handlers on same element', () => {
+  const src = `<meta>name: "x-multi-handlers"</meta>
+<script>
+  fn handleClick() { console.log("click") }
+  fn handleEnter() { console.log("enter") }
+  fn handleLeave() { console.log("leave") }
+  fn handleFocus() { console.log("focus") }
+</script>
+<template>
+  <button @click="handleClick" @mouseenter="handleEnter" @mouseleave="handleLeave" @focus="handleFocus">
+    Hover and Click
+  </button>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Should have multiple addEventListener calls
+  const addEventCount = (result.output.match(/addEventListener/g) || []).length;
+  assert(addEventCount >= 4, 'Should have at least 4 addEventListener calls');
+});
+
+test('edge case - three event handlers on same element', () => {
+  const src = `<meta>name: "x-three-handlers"</meta>
+<script>
+  fn handleA() {}
+  fn handleB() {}
+  fn handleC() {}
+</script>
+<template>
+  <div @click="handleA" @dblclick="handleB" @keydown="handleC">Multi-handler</div>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - boolean prop passing with disabled attribute', () => {
+  const src = `<meta>name: "x-bool-props"</meta>
+<script>
+  prop disabled: boolean = false
+  prop required: boolean = true
+  prop readonly: boolean = false
+</script>
+<template>
+  <input :disabled="disabled" :required="required" :readonly="readonly" />
+  <button :disabled="disabled">Submit</button>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'observedAttributes');
+});
+
+test('edge case - scoped CSS with media queries', () => {
+  const src = `<meta>name: "x-media"
+shadow: none</meta>
+<script>state theme: string = "light"</script>
+<template><div class="container">{{ theme }}</div></template>
+<style>
+  .container { padding: 10px; }
+  @media (max-width: 768px) {
+    .container { padding: 5px; }
+  }
+  @media (prefers-dark-colorscheme) {
+    .container { background: black; color: white; }
+  }
+</style>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Should have scoped media queries
+  assertContains(result.output, 'data-flare-scope');
+  assertContains(result.output, '@media');
+});
+
+test('edge case - scoped CSS with pseudo-classes', () => {
+  const src = `<meta>name: "x-pseudo"
+shadow: none</meta>
+<template><button class="btn">Click</button></template>
+<style>
+  .btn:hover { background: blue; }
+  .btn:active { background: darkblue; }
+  .btn:focus { outline: 2px solid gold; }
+</style>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'data-flare-scope');
+  assertContains(result.output, ':hover');
+});
+
+test('edge case - scoped CSS with pseudo-elements', () => {
+  const src = `<meta>name: "x-pseudo-elem"
+shadow: none</meta>
+<template><button class="btn">Click</button></template>
+<style>
+  .btn::before { content: "→ "; }
+  .btn::after { content: " ←"; }
+</style>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'data-flare-scope');
+});
+
+test('edge case - very long interpolation expression', () => {
+  const src = `<meta>name: "x-long-expr"</meta>
+<script>
+  state a: number = 1
+  state b: number = 2
+  state c: number = 3
+</script>
+<template>
+  <div>{{ (a + b + c) * 2 - a / 2 + b * 3 - c + a * b * c }}</div>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - prop with object default values', () => {
+  const src = `<meta>name: "x-complex-obj"</meta>
+<script>
+  prop title: string = "default"
+  prop count: number = 0
+  prop enabled: boolean = true
+</script>
+<template>
+  <div>{{ title }} - {{ count }} - {{ enabled }}</div>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - union type prop with multiple options', () => {
+  const src = `<meta>name: "x-union-prop"</meta>
+<script>
+  prop size: string = "medium"
+  prop status: string | number = "idle"
+</script>
+<template>
+  <div>{{ size }} - {{ status }}</div>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - array type state with elements', () => {
+  const src = `<meta>name: "x-complex-array"</meta>
+<script>
+  state items: string[] = ["a", "b"]
+</script>
+<template>
+  <#for each="item" of="items" key="item">
+    <div>{{ item }}</div>
+  </#for>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - method with multiple parameters and complex body', () => {
+  const src = `<meta>name: "x-complex-method"</meta>
+<script>
+  state count: number = 0
+  fn update(n: number, mult: number = 1, add: number = 0) {
+    count = (count + n) * mult + add
+    console.log("updated", count)
+  }
+</script>
+<template>
+  <button @click="update(5, 2, 1)">Update</button>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - emit with complex data type', () => {
+  const src = `<meta>name: "x-complex-emit"</meta>
+<script>
+  emit itemAdded: { id: number, name: string, timestamp: number }
+  emit error: { code: string, message: string }
+</script>
+<template>
+  <button @click="itemAdded">Emit</button>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assertContains(result.output, 'CustomEvent');
+  assertContains(result.output, "'itemAdded'");
+  assertContains(result.output, "'error'");
+});
+
+test('edge case - interpolation with method calls and chaining', () => {
+  const src = `<meta>name: "x-chained-calls"</meta>
+<script>
+  state text: string = "hello world"
+  computed upper: string = text.toUpperCase()
+</script>
+<template>
+  <div>{{ upper }}</div>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
+test('edge case - conditional with complex ternary in template', () => {
+  const src = `<meta>name: "x-complex-ternary"</meta>
+<script>
+  state status: string = "pending"
+  state count: number = 0
+</script>
+<template>
+  <div>{{ status === "done" ? "Completed: " + count : status === "error" ? "Error!" : "Processing..." }}</div>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+});
+
 console.log('\n✓ All compiler tests passed');

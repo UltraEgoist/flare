@@ -282,7 +282,7 @@ impl<'a> TypeChecker<'a> {
         self.check_vars(expr);
     }
 
-    fn check_vars(&self, expr: &str) {
+    fn check_vars(&mut self, expr: &str) {
         let reserved: HashSet<&str> = [
             "true", "false", "null", "undefined", "void", "typeof", "instanceof", "new", "return",
             "if", "else", "for", "while", "const", "let", "var", "function", "class", "this",
@@ -301,25 +301,21 @@ impl<'a> TypeChecker<'a> {
         // Strip string literals before extracting identifiers
         let stripped = strip_strings(expr);
         let re = regex::Regex::new(r"\b[a-zA-Z_]\w*\b").unwrap();
-        for m in re.find_iter(&stripped) {
-            let id = m.as_str();
-            if reserved.contains(id) || self.type_aliases.contains_key(id) {
+        // Collect matches first to avoid borrow issues with self
+        let matches: Vec<String> = re.find_iter(&stripped).map(|m| m.as_str().to_string()).collect();
+        for id in &matches {
+            if reserved.contains(id.as_str()) || self.type_aliases.contains_key(id.as_str()) {
                 continue;
             }
-            if !self.symbols.contains_key(id) {
-                // Silently skip in Rust checker for now (matching JS behavior, diagnostics are pushed)
-                // In the JS version this pushes E0301 but we also do it here
+            if !self.symbols.contains_key(id.as_str()) {
                 let sug = self.similar(id);
-                let mut diags = self.diags.clone();
-                diags.push(Diagnostic {
+                self.diags.push(Diagnostic {
                     level: DiagLevel::Error,
                     code: "E0301".into(),
                     message: format!("未定義の識別子 '{}'", id),
                     span: None,
                     hint: sug.map(|s| format!("'{}' のことですか？", s)),
                 });
-                // Note: since we have &self, we can't mutate. We'll restructure to use interior mutability.
-                // For now, this is a known limitation - see below.
             }
         }
     }

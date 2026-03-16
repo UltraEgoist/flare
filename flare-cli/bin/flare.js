@@ -543,8 +543,12 @@ function cmdDev() {
     url = url.split('?')[0];
 
     // セキュリティ：パストトラバーサル攻撃対策
-    // URL をデコードしてから検証（エンコード回避対策）
-    url = decodeURIComponent(url);
+    // 多重エンコード攻撃（%252e%252e 等）対策: デコードを繰り返し実行
+    let prevUrl;
+    do {
+      prevUrl = url;
+      try { url = decodeURIComponent(url); } catch(e) { break; }
+    } while (url !== prevUrl);
     // ".." または null 文字を検出 → 403 Forbidden を返却
     if (url.includes('\0') || /\.\./.test(url)) {
       res.writeHead(403, { 'Content-Type': 'text/plain' });

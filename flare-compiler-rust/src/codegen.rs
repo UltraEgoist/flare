@@ -1002,7 +1002,7 @@ fn el_str(
         if is_custom {
             return format!("{}<{}{}></{}>\\n", pad, tag, attr_str, tag);
         }
-        return format!("{}<{}{} />\n", pad, tag, attr_str);
+        return format!("{}<{}{} />\\n", pad, tag, attr_str);
     }
 
     if let Some(ha) = html_attr {
@@ -1036,7 +1036,7 @@ fn el_str(
         bindings,
     );
     format!(
-        "{}<{}{}>\n{}{}</{}>\\n",
+        "{}<{}{}>\\n{}{}</{}>\\n",
         pad, tag, attr_str, children_str, pad, tag
     )
 }

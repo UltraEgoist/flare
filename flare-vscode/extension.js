@@ -351,21 +351,62 @@ const COMPLETIONS = {
   'type': { kind: vscode.CompletionItemKind.Keyword, detail: '型エイリアス', insertText: 'type ${1:Name} = ${2:type}' },
 
   // Template directives
-  '#if': { kind: vscode.CompletionItemKind.Keyword, detail: '条件分岐', insertText: '<#if condition="${1:condition}">\n  ${2:}\n</#if>' },
+  '#if': { kind: vscode.CompletionItemKind.Keyword, detail: '条件分岐', insertText: '<#if cond="${1:condition}">\n  ${2:}\n</#if>' },
   '#for': { kind: vscode.CompletionItemKind.Keyword, detail: 'ループ', insertText: '<#for each="${1:item}" of="${2:items}" key="${3:item.id}">\n  ${4:}\n</#for>' },
   ':else': { kind: vscode.CompletionItemKind.Keyword, detail: 'else分岐', insertText: '<:else>' },
-  ':else-if': { kind: vscode.CompletionItemKind.Keyword, detail: 'else-if分岐', insertText: '<:else-if condition="${1:condition}">' },
+  ':else-if': { kind: vscode.CompletionItemKind.Keyword, detail: 'else-if分岐', insertText: '<:else-if cond="${1:condition}">' },
   ':empty': { kind: vscode.CompletionItemKind.Keyword, detail: '空時の表示', insertText: '<:empty>\n  ${1:}\n</:empty>' },
   '{{ }}': { kind: vscode.CompletionItemKind.Snippet, detail: 'テンプレート式', insertText: '{{ ${1:expr} }}' },
-  '@html': { kind: vscode.CompletionItemKind.Keyword, detail: '生HTML注入', insertText: '@html="${1:content}"' },
+  '@html': { kind: vscode.CompletionItemKind.Keyword, detail: '生HTML注入（XSS注意）', insertText: '@html="${1:content}"' },
 
-  // Attribute prefixes
+  // File scaffold snippet (like HTML's ! shortcut)
+  'flare': { kind: vscode.CompletionItemKind.Snippet, detail: 'Flare コンポーネント雛形', insertText: '<meta>\n  name: "${1:x-my-component}"\n  shadow: ${2|open,closed,none|}\n</meta>\n\n<script>\n  ${3:state count: number = 0}\n</script>\n\n<template>\n  ${4:<p>Hello, Flare!</p>}\n</template>\n\n<style>\n  ${5::host \\{ display: block; \\}}\n</style>' },
+  'flare-minimal': { kind: vscode.CompletionItemKind.Snippet, detail: '最小 Flare コンポーネント', insertText: '<meta>\n  name: "${1:x-my-component}"\n</meta>\n\n<template>\n  ${2:<p>Hello!</p>}\n</template>' },
+
+  // Event handlers
   '@click': { kind: vscode.CompletionItemKind.Method, detail: 'クリックイベント', insertText: '@click="${1:handler}"' },
   '@input': { kind: vscode.CompletionItemKind.Method, detail: 'input イベント', insertText: '@input="${1:handler}"' },
-  ':class': { kind: vscode.CompletionItemKind.Method, detail: '動的クラス', insertText: ':class="${1:{ active: isActive }}"' },
-  ':disabled': { kind: vscode.CompletionItemKind.Method, detail: '動的disabled属性', insertText: ':disabled="${1:isDisabled}"' },
+  '@change': { kind: vscode.CompletionItemKind.Method, detail: 'change イベント', insertText: '@change="${1:handler}"' },
+  '@submit': { kind: vscode.CompletionItemKind.Method, detail: 'submit イベント', insertText: '@submit|prevent="${1:handler}"' },
+  '@keydown': { kind: vscode.CompletionItemKind.Method, detail: 'keydown イベント', insertText: '@keydown="${1:handler}"' },
+  '@keyup': { kind: vscode.CompletionItemKind.Method, detail: 'keyup イベント', insertText: '@keyup="${1:handler}"' },
+  '@focus': { kind: vscode.CompletionItemKind.Method, detail: 'focus イベント', insertText: '@focus="${1:handler}"' },
+  '@blur': { kind: vscode.CompletionItemKind.Method, detail: 'blur イベント', insertText: '@blur="${1:handler}"' },
+  '@mouseenter': { kind: vscode.CompletionItemKind.Method, detail: 'mouseenter イベント', insertText: '@mouseenter="${1:handler}"' },
+  '@mouseleave': { kind: vscode.CompletionItemKind.Method, detail: 'mouseleave イベント', insertText: '@mouseleave="${1:handler}"' },
+  '@dblclick': { kind: vscode.CompletionItemKind.Method, detail: 'ダブルクリック', insertText: '@dblclick="${1:handler}"' },
+
+  // Dynamic attribute bindings
+  ':class': { kind: vscode.CompletionItemKind.Property, detail: '動的クラス', insertText: ':class="${1:expression}"' },
+  ':style': { kind: vscode.CompletionItemKind.Property, detail: '動的スタイル', insertText: ':style="${1:expression}"' },
+  ':id': { kind: vscode.CompletionItemKind.Property, detail: '動的ID', insertText: ':id="${1:expression}"' },
+  ':src': { kind: vscode.CompletionItemKind.Property, detail: '動的src（URL安全チェック付）', insertText: ':src="${1:imageUrl}"' },
+  ':href': { kind: vscode.CompletionItemKind.Property, detail: '動的href（URL安全チェック付）', insertText: ':href="${1:url}"' },
+  ':alt': { kind: vscode.CompletionItemKind.Property, detail: '動的alt', insertText: ':alt="${1:altText}"' },
+  ':value': { kind: vscode.CompletionItemKind.Property, detail: '動的value', insertText: ':value="${1:expression}"' },
+  ':placeholder': { kind: vscode.CompletionItemKind.Property, detail: '動的placeholder', insertText: ':placeholder="${1:text}"' },
+  ':disabled': { kind: vscode.CompletionItemKind.Property, detail: '動的disabled', insertText: ':disabled="${1:isDisabled}"' },
+  ':hidden': { kind: vscode.CompletionItemKind.Property, detail: '動的hidden', insertText: ':hidden="${1:isHidden}"' },
+  ':checked': { kind: vscode.CompletionItemKind.Property, detail: '動的checked', insertText: ':checked="${1:isChecked}"' },
+  ':for': { kind: vscode.CompletionItemKind.Property, detail: '動的for（label用）', insertText: ':for="${1:inputId}"' },
+  ':title': { kind: vscode.CompletionItemKind.Property, detail: '動的title', insertText: ':title="${1:tooltip}"' },
+  ':name': { kind: vscode.CompletionItemKind.Property, detail: '動的name', insertText: ':name="${1:fieldName}"' },
+  ':type': { kind: vscode.CompletionItemKind.Property, detail: '動的type', insertText: ':type="${1:inputType}"' },
+  ':maxlength': { kind: vscode.CompletionItemKind.Property, detail: '動的maxlength', insertText: ':maxlength="${1:max}"' },
+  ':pattern': { kind: vscode.CompletionItemKind.Property, detail: '動的pattern', insertText: ':pattern="${1:regex}"' },
+  ':required': { kind: vscode.CompletionItemKind.Property, detail: '動的required', insertText: ':required="${1:isRequired}"' },
+  ':readonly': { kind: vscode.CompletionItemKind.Property, detail: '動的readonly', insertText: ':readonly="${1:isReadOnly}"' },
+  ':aria-label': { kind: vscode.CompletionItemKind.Property, detail: '動的aria-label', insertText: ':aria-label="${1:label}"' },
+  ':data-': { kind: vscode.CompletionItemKind.Property, detail: '動的data属性', insertText: ':data-${1:name}="${2:value}"' },
+
+  // Two-way binding
   ':bind': { kind: vscode.CompletionItemKind.Method, detail: '双方向バインディング', insertText: ':bind="${1:stateName}"' },
+
+  // Ref
   'ref': { kind: vscode.CompletionItemKind.Method, detail: 'DOM参照', insertText: 'ref="${1:refName}"' },
+
+  // Slot
+  'slot': { kind: vscode.CompletionItemKind.Keyword, detail: 'スロット定義', insertText: '<slot${1: name="${2:slotName}"}>${3}</slot>' },
 };
 
 /**

@@ -1678,6 +1678,8 @@ function generate(c, options) {
       }
       if(a.html)continue;
       if(a.dynamic){
+        // Security: block dangerous on* event handler attributes (e.g., :onclick, :onmouseover)
+        if(/^on[a-z]/i.test(a.name)) continue;
         const txExpr = loopCtx ? txLoop(a.value, loopCtx) : tx(a.value);
         if(a.name==='class')as+=` class="\${this.#escAttr(Object.entries(${txExpr}).filter(([,v])=>v).map(([k])=>k).join(' '))}"`;
         else if(['disabled','checked','hidden'].includes(a.name))as+=` \${${txExpr} ? '${a.name}' : ''}`;
@@ -2150,7 +2152,7 @@ function generate(c, options) {
   o+=`  #escAttr(val) {\n`;
   o+=`    if (val == null) return '';\n`;
   o+=`    const s = String(val);\n`;
-  o+=`    if (!/[&<>"'`+'`]/.test(s)) return s;\n';
+  o+=`    if (!/[&<>"'`+'`\\n\\r]/.test(s)) return s;\n';
   o+=`    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\`/g,'&#96;').replace(/\\n/g,'&#10;').replace(/\\r/g,'&#13;');\n`;
   o+=`  }\n\n`;
 
