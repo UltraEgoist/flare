@@ -999,4 +999,138 @@ test('S-10: invalid #for syntax reports diagnostic error', () => {
   assert.ok(result.diagnostics.some(d => d.code === 'E0004'), 'should report E0004 for parse error');
 });
 
+// ============================================================
+// DIFF-BASED DOM RENDERING TESTS
+// ============================================================
+
+test('diff - generated output contains #getNewTree method', () => {
+  const src = `<meta>name: "x-diff-a"</meta>
+<script>state count: number = 0</script>
+<template><p>{{ count }}</p></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assert.ok(result.output.includes('#getNewTree()'), 'should contain #getNewTree method');
+});
+
+test('diff - generated output contains #patch method', () => {
+  const src = `<meta>name: "x-diff-b"</meta>
+<script>state count: number = 0</script>
+<template><p>{{ count }}</p></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assert.ok(result.output.includes('#patch(parent, newContent)'), 'should contain #patch method');
+});
+
+test('diff - #update calls #patch instead of #render', () => {
+  const src = `<meta>name: "x-diff-c"</meta>
+<script>state count: number = 0</script>
+<template><p>{{ count }}</p></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // #update should call #patch, not #render
+  const updateMatch = result.output.match(/#update\(\)\s*\{[\s\S]*?\n  \}/);
+  assert.ok(updateMatch, 'should have #update method');
+  assert.ok(updateMatch[0].includes('#patch('), '#update should call #patch');
+  assert.ok(!updateMatch[0].includes('#render()'), '#update should NOT call #render');
+});
+
+test('diff - #patch handles attribute diffing', () => {
+  const src = `<meta>name: "x-diff-d"</meta>
+<script>state cls: string = "active"</script>
+<template><div :class="cls">test</div></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // Verify #patch has attribute comparison logic
+  assert.ok(result.output.includes('o.getAttribute(a.name) !== a.value'), 'should compare attributes');
+  assert.ok(result.output.includes('o.setAttribute(a.name, a.value)'), 'should set changed attributes');
+  assert.ok(result.output.includes('o.removeAttribute('), 'should remove old attributes');
+});
+
+test('diff - #patch handles text node diffing', () => {
+  const src = `<meta>name: "x-diff-e"</meta>
+<script>state msg: string = "hello"</script>
+<template><p>{{ msg }}</p></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assert.ok(result.output.includes('o.textContent !== n.textContent'), 'should compare text nodes');
+});
+
+test('diff - #patch handles node type mismatch replacement', () => {
+  const src = `<meta>name: "x-diff-f"</meta>
+<script>state x: number = 0</script>
+<template><p>{{ x }}</p></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assert.ok(result.output.includes('o.nodeType !== n.nodeType || o.nodeName !== n.nodeName'), 'should detect node type mismatch');
+  assert.ok(result.output.includes('parent.replaceChild(n.cloneNode(true), o)'), 'should replace mismatched nodes');
+});
+
+test('diff - #patch skips STYLE element children', () => {
+  const src = `<meta>name: "x-diff-g"</meta>
+<script>state x: number = 0</script>
+<template><p>{{ x }}</p></template>
+<style>p { color: red; }</style>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assert.ok(result.output.includes("o.tagName === 'STYLE'"), 'should skip STYLE children');
+});
+
+test('diff - #patch handles node removal (old > new)', () => {
+  const src = `<meta>name: "x-diff-h"</meta>
+<script>state items: string[] = ["a"]</script>
+<template>
+  <#for each="item" of="items"><p>{{ item }}</p></#for>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assert.ok(result.output.includes('parent.removeChild(o)'), 'should remove extra old nodes');
+});
+
+test('diff - #patch handles node addition (new > old)', () => {
+  const src = `<meta>name: "x-diff-i"</meta>
+<script>state items: string[] = ["a"]</script>
+<template>
+  <#for each="item" of="items"><p>{{ item }}</p></#for>
+</template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  assert.ok(result.output.includes('parent.appendChild(n.cloneNode(true))'), 'should append new nodes');
+});
+
+test('diff - #updateKeepFocus delegates to #update (simplified)', () => {
+  const src = `<meta>name: "x-diff-j"</meta>
+<script>state text: string = ""</script>
+<template><input :bind="text" /></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // #updateKeepFocus should be simplified - just calls #update
+  const keepFocusMatch = result.output.match(/#updateKeepFocus\(focusedEl\)\s*\{[\s\S]*?\n  \}/);
+  assert.ok(keepFocusMatch, 'should have #updateKeepFocus method');
+  assert.ok(keepFocusMatch[0].includes('this.#update()'), 'should delegate to #update');
+  // Should NOT contain old focus-save/restore logic
+  assert.ok(!keepFocusMatch[0].includes('selectionStart'), 'should not have manual focus preservation');
+});
+
+test('diff - connectedCallback still uses #render for initial render', () => {
+  const src = `<meta>name: "x-diff-k"</meta>
+<script>state x: number = 0</script>
+<template><p>{{ x }}</p></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // connectedCallback should use #render (full initial render), not #patch
+  const ccMatch = result.output.match(/connectedCallback\(\)\s*\{[\s\S]*?\n  \}/);
+  assert.ok(ccMatch, 'should have connectedCallback');
+  assert.ok(ccMatch[0].includes('this.#render()'), 'connectedCallback should use #render for initial');
+});
+
+test('diff - shadow:none mode uses correct root for patch', () => {
+  const src = `<meta>name: "x-diff-l"\nshadow: none</meta>
+<script>state x: number = 0</script>
+<template><p>{{ x }}</p></template>`;
+  const result = compile(src);
+  assertSuccess(result);
+  // For shadow:none, root is 'this' instead of 'this.#shadow'
+  assert.ok(result.output.includes('#patch(this,'), '#patch should use `this` as root for shadow:none');
+});
+
 console.log('\n✓ All compiler tests passed');

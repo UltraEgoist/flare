@@ -2020,23 +2020,73 @@ function generate(c, options) {
     o += '\n';
   }
 
-  // #render - uses template + innerHTML for proper custom element upgrade
+  // #render - initial render (full replace) and template generation
   o+=`  #render() {\n`;
   o+=`    const tpl = document.createElement('template');\n`;
   o+=`    tpl.innerHTML = \`\n`;
   if(c.style) {
     if (us) {
-      // Shadow DOM mode: styles are naturally scoped, just minify
       o+=`      <style>${minCss(c.style)}</style>\n`;
     } else {
-      // shadow: none mode: apply CSS scoping to prevent style leaking
-      // Selectors are prefixed with [data-flare-scope="tag-name"]
       o+=`      <style>${minCss(scopeCss(c.style, tn))}</style>\n`;
     }
   }
   o+=templateStr;
   o+=`    \`;\n`;
   o+=`    ${root}.replaceChildren(tpl.content.cloneNode(true));\n`;
+  o+=`  }\n\n`;
+
+  // #getNewTree - generate new DOM tree from current state (for diffing)
+  o+=`  #getNewTree() {\n`;
+  o+=`    const tpl = document.createElement('template');\n`;
+  o+=`    tpl.innerHTML = \`\n`;
+  if(c.style) {
+    if (us) {
+      o+=`      <style>${minCss(c.style)}</style>\n`;
+    } else {
+      o+=`      <style>${minCss(scopeCss(c.style, tn))}</style>\n`;
+    }
+  }
+  o+=templateStr;
+  o+=`    \`;\n`;
+  o+=`    return tpl.content;\n`;
+  o+=`  }\n\n`;
+
+  // #patch - diff-based DOM patching (morphdom-lite)
+  o+=`  #patch(parent, newContent) {\n`;
+  o+=`    const newNodes = Array.from(newContent.childNodes);\n`;
+  o+=`    const oldNodes = Array.from(parent.childNodes);\n`;
+  o+=`    const max = Math.max(oldNodes.length, newNodes.length);\n`;
+  o+=`    for (let i = 0; i < max; i++) {\n`;
+  o+=`      const o = oldNodes[i], n = newNodes[i];\n`;
+  o+=`      if (!n) { parent.removeChild(o); continue; }\n`;
+  o+=`      if (!o) { parent.appendChild(n.cloneNode(true)); continue; }\n`;
+  o+=`      if (o.nodeType !== n.nodeType || o.nodeName !== n.nodeName) {\n`;
+  o+=`        parent.replaceChild(n.cloneNode(true), o); continue;\n`;
+  o+=`      }\n`;
+  o+=`      if (o.nodeType === 3) {\n`;
+  o+=`        if (o.textContent !== n.textContent) o.textContent = n.textContent;\n`;
+  o+=`        continue;\n`;
+  o+=`      }\n`;
+  o+=`      if (o.nodeType === 1) {\n`;
+  // Patch attributes
+  o+=`        const oA = o.attributes, nA = n.attributes;\n`;
+  o+=`        for (let j = nA.length - 1; j >= 0; j--) {\n`;
+  o+=`          const a = nA[j];\n`;
+  o+=`          if (o.getAttribute(a.name) !== a.value) o.setAttribute(a.name, a.value);\n`;
+  o+=`        }\n`;
+  o+=`        for (let j = oA.length - 1; j >= 0; j--) {\n`;
+  o+=`          if (!n.hasAttribute(oA[j].name)) o.removeAttribute(oA[j].name);\n`;
+  o+=`        }\n`;
+  // Skip <style> children (no need to diff CSS)
+  o+=`        if (o.tagName === 'STYLE') {\n`;
+  o+=`          if (o.textContent !== n.textContent) o.textContent = n.textContent;\n`;
+  o+=`          continue;\n`;
+  o+=`        }\n`;
+  // Recurse into children
+  o+=`        this.#patch(o, n);\n`;
+  o+=`      }\n`;
+  o+=`    }\n`;
   o+=`  }\n\n`;
 
   // #bindEvents - using data-flare-id
@@ -2053,7 +2103,7 @@ function generate(c, options) {
   }
   o+=`  }\n\n`;
 
-  // #update - full re-render
+  // #update - diff-based re-render (preserves DOM state)
   o+=`  #update() {\n`;
   o+=`    this.#listeners.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));\n`;
   o+=`    this.#listeners = [];\n`;
@@ -2066,7 +2116,7 @@ function generate(c, options) {
       o+=`    const __watchFire_${safeDepKey(d.deps)} = ${depChecks};\n`;
     }
   }
-  o+=`    this.#render();\n`;
+  o+=`    this.#patch(${root}, this.#getNewTree());\n`;
   o+=`    this.#bindEvents();\n`;
   o+=`    this.#bindRefs();\n`;
   for(const d of c.script) {
@@ -2082,16 +2132,10 @@ function generate(c, options) {
   }
   o+=`  }\n\n`;
 
-  // #updateKeepFocus - re-render but preserve focus on :bind inputs
+  // #updateKeepFocus - with diff-based patching, focus is preserved naturally
+  // since #patch() modifies existing DOM nodes in-place rather than replacing them.
   o+=`  #updateKeepFocus(focusedEl) {\n`;
-  o+=`    const fid = focusedEl?.getAttribute('data-flare-id');\n`;
-  o+=`    const selStart = focusedEl?.selectionStart;\n`;
-  o+=`    const selEnd = focusedEl?.selectionEnd;\n`;
   o+=`    this.#update();\n`;
-  o+=`    if (fid) {\n`;
-  o+=`      const el = ${root}.querySelector(\`[data-flare-id="\${fid}"]\`);\n`;
-  o+=`      if (el) { el.focus(); if (selStart != null) { el.selectionStart = selStart; el.selectionEnd = selEnd; } }\n`;
-  o+=`    }\n`;
   o+=`  }\n\n`;
 
   // #esc - HTML text content escaping (prevents XSS in {{ }} interpolation)

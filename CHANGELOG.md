@@ -5,10 +5,23 @@ Flare 言語の全変更履歴です。
 ## [Unreleased]
 
 ### Added
+- **差分DOM更新（Diff-based DOM Rendering）**: `#update()` でフル再レンダリングの代わりに morphdom-lite アルゴリズムによるDOM差分パッチを実装。既存のDOMノードを再利用し、変更箇所のみ更新することでパフォーマンスを改善。フォーカス・カーソル位置も自然に保持
 - **Scoped CSS**: `shadow: none` モード時に CSS セレクタを `[data-flare-scope="tag-name"]` でスコーピング。スタイル漏れを防止
-- **包括的テストスイート**: コンパイラテスト 79 件、CLI テスト 23 件（合計 102 件）
+- **包括的テストスイート**: コンパイラテスト 100 件、CLI テスト 23 件（合計 123 件）
 - **コードコメント**: compiler.js, flare.js, extension.js に JSDoc コメントを追加（保守性向上）
 - **新規サンプルコンポーネント**: `x-card`（Slot デモ）、`x-tabs`（Scoped CSS + ループ）、`x-alert`（条件分岐 + Scoped CSS）
+
+### Security
+- **S-01**: `scopeCss()` で tagName をサニタイズし CSS インジェクション防止
+- **S-02**: `escRx()` ヘルパーで RegExp メタ文字エスケープ
+- **S-03**: イベント名のサニタイズ（英数字+ハイフンのみ許可）
+- **S-04**: `#escUrl()` で URL デコード後にプロトコルチェック（エンコードバイパス防止）
+- **S-05**: コンポーネント名の Web Component 仕様準拠バリデーション
+- **S-06**: dev サーバー CSP から `unsafe-eval` を除去
+- **S-07**: `isInString()` でバックスラッシュエスケープを正しく処理
+- **S-08**: `txSafe()` テンプレートリテラル `${}` 内の文字列を正しく処理
+- **S-09**: watch 依存キーをサニタイズ（有効なJS識別子に変換）
+- **S-10**: パーサーエラーを型チェック前に収集し、診断情報として報告
 
 ### Fixed
 - `test` スクリプトから存在しない `test-bugs.js` への参照を削除
