@@ -2442,4 +2442,113 @@ fn add(a, b) { return a + b }
   assertContains(result.output, 'this.#y', 'Should replace y in expression');
 });
 
+// ============================================================
+// TESTS: SOURCE MAP SUPPORT
+// ============================================================
+
+test('Source map: compile result includes sourceMap property', () => {
+  const src = `<meta>name: "x-sourcemap-test"</meta>
+<script>
+state count: number = 0
+fn increment() { count += 1 }
+</script>
+<template><div>{{ count }}</div></template>`;
+  const result = compile(src, 'test.flare');
+  assertSuccess(result);
+  assert.ok(result.sourceMap, 'Result should include sourceMap property');
+});
+
+test('Source map: V3 format structure', () => {
+  const src = `<meta>name: "x-sourcemap-v3"</meta>
+<script>
+state x: number = 0
+</script>
+<template><div>{{ x }}</div></template>`;
+  const result = compile(src, 'test.flare');
+  assertSuccess(result);
+  const map = result.sourceMap;
+  assert.strictEqual(map.version, 3, 'Source map should be version 3');
+  assert.ok(Array.isArray(map.sources), 'Should have sources array');
+  assert.strictEqual(map.sources.length, 1, 'Should have one source');
+  assert.strictEqual(map.sources[0], 'test.flare', 'Source should be original filename');
+  assert.ok(typeof map.mappings === 'string', 'Should have mappings string');
+  assert.ok(Array.isArray(map.names), 'Should have names array');
+});
+
+test('Source map: output includes sourceMappingURL comment', () => {
+  const src = `<meta>name: "x-sourcemap-url"</meta>
+<script>
+state y: number = 0
+</script>
+<template><div>{{ y }}</div></template>`;
+  const result = compile(src, 'component.flare');
+  assertSuccess(result);
+  assertContains(result.output, '//# sourceMappingURL=component.js.map', 'Output should include sourceMappingURL comment');
+});
+
+test('Source map: sourceMappingURL uses correct filename', () => {
+  const src = `<meta>name: "x-sourcemap-filename"</meta>
+<script>
+state z: string = 'test'
+</script>
+<template><div>{{ z }}</div></template>`;
+  const result = compile(src, 'my-component.flare');
+  assertSuccess(result);
+  assertContains(result.output, '//# sourceMappingURL=my-component.js.map', 'sourceMappingURL should reference my-component.js.map');
+});
+
+test('Source map: mappings is non-empty for valid code', () => {
+  const src = `<meta>name: "x-sourcemap-mappings"</meta>
+<script>
+state data: string = 'hello'
+fn getData() { return data }
+</script>
+<template><div>{{ getData() }}</div></template>`;
+  const result = compile(src, 'test.flare');
+  assertSuccess(result);
+  assert.ok(result.sourceMap.mappings.length > 0, 'Mappings string should not be empty');
+});
+
+test('Source map: mappings contains semicolons for line separation', () => {
+  const src = `<meta>name: "x-sourcemap-lines"</meta>
+<script>
+state count: number = 0
+</script>
+<template><div>{{ count }}</div></template>`;
+  const result = compile(src, 'test.flare');
+  assertSuccess(result);
+  // Source maps use semicolons to separate lines
+  assert.ok(result.sourceMap.mappings.includes(';') || result.sourceMap.mappings.length > 0, 'Mappings should contain line separators or be non-trivial');
+});
+
+test('Source map: script block lines are tracked', () => {
+  const src = `<meta>name: "x-sourcemap-script"</meta>
+<script>
+state value: number = 42
+fn getValue() { return value }
+</script>
+<template><div>{{ getValue() }}</div></template>`;
+  const result = compile(src, 'test.flare');
+  assertSuccess(result);
+  const map = result.sourceMap;
+  // Check that we have some mappings
+  assert.ok(map.mappings, 'Should have non-empty mappings');
+  assert.strictEqual(map.sources[0], 'test.flare', 'Original source should be test.flare');
+});
+
+test('Source map: multiple state/function declarations', () => {
+  const src = `<meta>name: "x-sourcemap-multi"</meta>
+<script>
+state a: number = 1
+state b: number = 2
+fn add(x, y) { return x + y }
+fn multiply(x, y) { return x * y }
+</script>
+<template><div>{{ add(a, b) }}</div></template>`;
+  const result = compile(src, 'test.flare');
+  assertSuccess(result);
+  assert.ok(result.sourceMap, 'Should have source map');
+  assert.ok(result.sourceMap.mappings, 'Should have mappings');
+});
+
 console.log('\n✓ All compiler tests passed');

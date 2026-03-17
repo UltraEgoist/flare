@@ -328,8 +328,10 @@ function provideHover(document, position) {
 
     // ── JSDocコメント表示 ──
     // 宣言の直前にある /** ... */ コメントを表示
+    // NEW-V10: ユーザー定義JSDocのマークダウン特殊文字をサニタイズ
     if (sym.doc) {
-      md += `${sym.doc}\n\n`;
+      const safeDoc = sym.doc.replace(/[<>]/g, c => c === '<' ? '&lt;' : '&gt;');
+      md += `${safeDoc}\n\n`;
     }
 
     // ── メタ情報バッジ ──
@@ -965,7 +967,8 @@ function runDiagnostics(document) {
 
       // ── @event ハンドラの検証 ──
       // イベントハンドラが fn として定義されているか確認
-      const eventRe = /@(\w+(?:\|\w+)*)="([^"]*)"/g;
+      // NEW-V12: 修飾子数を最大10に制限（ReDoS防止）
+      const eventRe = /@(\w+(?:\|\w+){0,10})="([^"]*)"/g;
       let em;
       while ((em = eventRe.exec(line)) !== null) {
         const handler = em[2].trim();

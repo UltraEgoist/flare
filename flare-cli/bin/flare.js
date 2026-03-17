@@ -355,6 +355,14 @@ function cmdBuild() {
       const outName = fileName.replace('.flare', `.${target === 'ts' ? 'ts' : 'js'}`);
       const outPath = path.join(componentsDir, outName);
       fs.writeFileSync(outPath, result.output);
+
+      // ソースマップファイルを出力（.js.map）
+      if (result.sourceMap) {
+        const mapName = outName + '.map';
+        const mapPath = path.join(componentsDir, mapName);
+        fs.writeFileSync(mapPath, JSON.stringify(result.sourceMap, null, 2));
+      }
+
       const size = (Buffer.byteLength(result.output) / 1024).toFixed(1);
       console.log(`  ${c.ok('✓')} → components/${outName} (${size} KB)`);
 
@@ -497,7 +505,12 @@ function cmdDev() {
   const outDir = path.resolve(config.outdir || 'dist');
   const htmlDir = path.resolve('src');
   // CLI引数からポート番号を取得（デフォルト 3000）
+  // NEW-V8: ポート番号の範囲バリデーション
   const port = parseInt(getArg('--port') || '3000', 10);
+  if (isNaN(port) || port < 1 || port > 65535) {
+    console.error(`${C.red}エラー:${C.reset} 無効なポート番号です（1〜65535の範囲で指定してください）`);
+    process.exit(1);
+  }
 
   fs.mkdirSync(outDir, { recursive: true });
   banner();
@@ -692,7 +705,15 @@ function buildAll(srcDir, outDir) {
     if (result.success) {
       // 個別ファイルを components/ に出力
       const outName = fileName.replace('.flare', '.js');
-      fs.writeFileSync(path.join(componentsDir, outName), result.output);
+      const outPath = path.join(componentsDir, outName);
+      fs.writeFileSync(outPath, result.output);
+
+      // ソースマップファイルを出力（.js.map）
+      if (result.sourceMap) {
+        const mapPath = path.join(componentsDir, outName + '.map');
+        fs.writeFileSync(mapPath, JSON.stringify(result.sourceMap, null, 2));
+      }
+
       // バンドル用に蓄積
       bundleParts.push(`// ── ${fileName} ──\n${result.output}`);
       success++;

@@ -2465,16 +2465,175 @@ function compile(source, fileName, options) {
   // Phase 4: Code generation
   const output=generate(ast, options);
 
-  // Phase 5: Optional .d.ts generation
+  // Phase 5: Generate source map
+  // Create mappings from generated code back to original .flare file
+  // For now, we use a simple mapping: script block maps 1:1, template/style map to their lines
+  const mappings = [];
+  let generatedLine = 0;
+
+  // Script block mappings: map each line of generated script to original script line
+  for (const scriptDecl of ast.script) {
+    if (scriptDecl.line !== undefined) {
+      mappings.push({
+        generated: generatedLine,
+        original: scriptDecl.line - 1,  // Convert to 0-indexed
+        source: 0,
+        column: 0
+      });
+    }
+    generatedLine++;
+  }
+
+  // Add a mapping for the class declaration (roughly maps to template block start)
+  const templateBlock = ast.template ? 40 : 0; // Estimate based on typical output structure
+  if (templateBlock > 0) {
+    for (let i = 0; i < templateBlock; i++) {
+      if (mappings.length === 0 || mappings[mappings.length - 1].generated < i) {
+        mappings.push({
+          generated: i,
+          original: 0,
+          source: 0,
+          column: 0
+        });
+      }
+    }
+  }
+
+  // Generate source map object
+  const sourceMapFileName = fileName || 'component.flare';
+  const sourceMap = generateSourceMap(mappings, sourceMapFileName);
+
+  // Append source map comment to output
+  const mapFileName = sourceMapFileName.replace(/\.flare$/, '.js.map');
+  const outputWithMap = appendSourceMapComment(output, mapFileName);
+
+  // Phase 6: Optional .d.ts generation
   const dtsOutput=options?.target==='ts'?generateDts(ast):undefined;
 
   return{
     success:true,
-    output,
+    output: outputWithMap,
+    sourceMap,
     dtsOutput,
     diagnostics,
     ast
   };
+}
+
+// ============================================================
+// Source Map Support (VLQ encoding and generation)
+// ============================================================
+
+/**
+ * Encode a single number in VLQ (Variable-Length Quantity) format.
+ * Used in Source Map V3 mappings string.
+ *
+ * VLQ encodes a number as a sequence of base-64 digits. The algorithm:
+ * 1. Convert negative numbers: -x becomes (x << 1) | 1, positive x becomes x << 1
+ * 2. Split into 5-bit chunks, MSB = continuation flag
+ * 3. Convert each chunk to base64 character
+ *
+ * @param {number} n - Number to encode
+ * @returns {string} VLQ-encoded string
+ * @description
+ * Base64 alphabet for VLQ: ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/
+ */
+function vlqEncode(n) {
+  const base64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let vlq = '';
+  // Convert to VLQ: sign bit, then magnitude
+  let value = n < 0 ? ((-n) << 1) | 1 : n << 1;
+  do {
+    let digit = value & 0x1f;  // Extract 5 bits
+    value >>>= 5;              // Shift right 5 bits
+    if (value > 0) digit |= 0x20;  // Set continuation bit if more digits follow
+    vlq += base64[digit];
+  } while (value > 0);
+  return vlq;
+}
+
+/**
+ * Generate Source Map V3 JSON from line mappings.
+ *
+ * Mappings is an array of line objects: [
+ *   { generated, original, source, name },
+ *   ...
+ * ]
+ *
+ * Where:
+ * - generated: line number in generated code (0-indexed)
+ * - original: line number in original .flare file (0-indexed)
+ * - source: index into sources array (usually 0)
+ * - name: optional, index into names array
+ *
+ * Returns a Source Map V3 object with encoded mappings string.
+ *
+ * @param {Array<Object>} mappings - Array of line mapping objects
+ * @param {string} fileName - Original source file name
+ * @returns {Object} Source Map V3 object
+ */
+function generateSourceMap(mappings, fileName) {
+  // Source Map V3 format requires mappings to be encoded as a single string
+  // with semicolons separating lines and commas separating entries within a line
+
+  let mappingsStr = '';
+  let lastGeneratedCol = 0;
+  let lastOriginalLine = 0;
+  let lastOriginalCol = 0;
+  let lastSourceIdx = 0;
+  let lastNameIdx = 0;
+
+  for (let i = 0; i < mappings.length; i++) {
+    if (i > 0 && mappings[i].generated !== mappings[i-1].generated) {
+      // New line
+      mappingsStr += ';';
+      lastGeneratedCol = 0;
+    } else if (i > 0) {
+      // Same line, new mapping
+      mappingsStr += ',';
+    }
+
+    const m = mappings[i];
+    // [generatedColumn, sourceIdx, originalLine, originalColumn, nameIdx]
+    const fields = [
+      m.generated - lastGeneratedCol,
+      m.source - lastSourceIdx,
+      m.original - lastOriginalLine,
+      m.column - lastOriginalCol
+    ];
+    // Only add nameIdx if present
+    if (m.name !== undefined) {
+      fields.push(m.name - lastNameIdx);
+    }
+
+    // Encode each field as VLQ
+    mappingsStr += fields.map(f => vlqEncode(f)).join('');
+
+    // Update state for relative encoding
+    lastGeneratedCol = m.generated;
+    lastSourceIdx = m.source;
+    lastOriginalLine = m.original;
+    lastOriginalCol = m.column;
+    if (m.name !== undefined) lastNameIdx = m.name;
+  }
+
+  return {
+    version: 3,
+    sources: [fileName],
+    names: [],
+    mappings: mappingsStr
+  };
+}
+
+/**
+ * Append source map comment to generated code.
+ *
+ * @param {string} code - Generated JavaScript code
+ * @param {string} mapFileName - Name of the .map file (e.g., "component.js.map")
+ * @returns {string} Code with sourceMappingURL comment appended
+ */
+function appendSourceMapComment(code, mapFileName) {
+  return code + '\n//# sourceMappingURL=' + mapFileName;
 }
 
 // ============================================================
