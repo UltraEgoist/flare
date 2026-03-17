@@ -338,6 +338,19 @@ function cmdBuild() {
   const bundleParts = [];
   const allUsedHelpers = new Set();  // Track helpers used across all components (for bundle optimization)
 
+  // ─── Component Registry: Build tag→file mapping for auto-import ───
+  const componentRegistry = {};
+  for (const file of files) {
+    const bn = path.basename(file);
+    const base = bn.replace(/\.flare$/, '').replace(/([A-Z])/g, '-$1').toLowerCase().replace(/^-/, '');
+    const tag = base.includes('-') ? base : 'x-' + base;
+    // Also check <meta> for custom name
+    const src = fs.readFileSync(file, 'utf-8');
+    const nameMatch = src.match(/<meta[^>]*>[\s\S]*?name\s*:\s*"?([a-z][a-z0-9-]*)"?/);
+    const actualTag = nameMatch ? nameMatch[1].trim() : tag;
+    componentRegistry[actualTag] = './' + bn.replace(/\.flare$/, '.js');
+  }
+
   // 各 .flare ファイルをコンパイル
   for (const file of files) {
     const source = fs.readFileSync(file, 'utf-8');
@@ -346,7 +359,8 @@ function cmdBuild() {
 
     // コンパイラ実行（../lib/compiler の compile() 関数を使用）
     // NEW-OPT: Pass optimize flag to enable tree-shaking
-    const result = compile(source, fileName, { target, optimize });
+    // Pass component registry for auto-import resolution
+    const result = compile(source, fileName, { target, optimize, componentRegistry });
 
     // 診断情報（エラー/警告）を表示
     for (const d of result.diagnostics) {

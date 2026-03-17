@@ -345,10 +345,22 @@ function parseScript(content, startLine) {
     let m;
 
     // ─── Import declarations ───
+    // Support: import "mod" (side-effect import)
     // Support: import * as ns from "mod"
     // Support: import Default from "mod"
     // Support: import { Named1, Named2 } from "mod"
     // Support: import Default, { Named1, Named2 } from "mod"
+    if ((m = line.match(/^import\s+["']([^"']+)["']\s*$/))) {
+      // Side-effect import: import "module"
+      decls.push({
+        kind:'import',
+        defaultImport: undefined,
+        namedImports: undefined,
+        from: m[1],
+        span: {line: ln}
+      });
+      i++; continue;
+    }
     if ((m = line.match(/^import\s+\*\s+as\s+(\w+)\s+from\s+["']([^"']+)["']/))) {
       decls.push({
         kind:'import',
@@ -1850,7 +1862,12 @@ function generate(c, options) {
         // Security: block dangerous on* event handler attributes (e.g., :onclick, :onmouseover)
         if(/^on[a-z]/i.test(a.name)) continue;
         const txExpr = loopCtx ? txLoop(a.value, loopCtx) : tx(a.value);
-        if(a.name==='class'){if(optimize)usedHelpers.add('escAttr');as+=` class="\${this.#escAttr(Object.entries(${txExpr}).filter(([,v])=>v).map(([k])=>k).join(' '))}"`;
+        if(a.name==='class'){
+          if(optimize)usedHelpers.add('escAttr');
+          // Support both object syntax {:class="{ active: isActive }"} and
+          // array syntax {:class="['base', isActive && 'active']"} and
+          // string syntax {:class="myClass"}
+          as+=` class="\${this.#escAttr(((v) => Array.isArray(v) ? v.filter(Boolean).join(' ') : typeof v === 'object' && v !== null ? Object.entries(v).filter(([,b])=>b).map(([k])=>k).join(' ') : String(v || ''))(${txExpr}))}"`;
         }else if(['disabled','checked','hidden'].includes(a.name))as+=` \${${txExpr} ? '${a.name}' : ''}`;
         // Security: sanitize href/src to block javascript: and data: URLs
         else if(['href','src','action','formaction'].includes(a.name)){if(optimize)usedHelpers.add('escUrl');as+=` ${a.name}="\${this.#escUrl(${txExpr})}"`;
@@ -2108,8 +2125,44 @@ function generate(c, options) {
   // Build template string first (populates eventBindings)
   const templateStr = tplStr(c.template, 6, null);
 
+  // ─── Collect import declarations ───
+  const imports = c.script.filter(d => d.kind === 'import');
+  const hasImports = imports.length > 0;
+
+  // Emit import statements BEFORE the IIFE (ES module top-level)
+  let importBlock = '';
+  if (hasImports) {
+    for (const imp of imports) {
+      const parts = [];
+      if (imp.defaultImport) parts.push(imp.defaultImport);
+      if (imp.namedImports) {
+        const ns = imp.namedImports.find(n => n.startsWith('*:'));
+        if (ns) {
+          // Namespace import: import * as ns from "mod"
+          parts.push(`* as ${ns.slice(2)}`);
+        } else {
+          const named = imp.namedImports.join(', ');
+          if (imp.defaultImport) {
+            // Already added default, just add named
+            parts.push(`{ ${named} }`);
+          } else {
+            parts.push(`{ ${named} }`);
+          }
+        }
+      }
+      if (parts.length === 0) {
+        // Side-effect import: import './module.js'
+        importBlock += `import '${imp.from}';\n`;
+      } else {
+        importBlock += `import ${parts.join(', ')} from '${imp.from}';\n`;
+      }
+    }
+    importBlock += '\n';
+  }
+
   // Now generate the class wrapped in IIFE
-  let o = `(() => {\n"use strict";\n\n`;
+  let o = importBlock;
+  o += `(() => {\n"use strict";\n\n`;
   o += `class ${cn} extends HTMLElement {\n`;
   for(const d of c.script)if(d.kind==='state')o+=`  #${d.name}${ts?': '+typeToTs(d.type):''} = ${d.init};\n`;
   for(const d of c.script)if(d.kind==='provide')o+=`  #${d.name}${ts?': '+typeToTs(d.type):''} = ${d.init};\n`;
@@ -2353,13 +2406,13 @@ function generate(c, options) {
   o+=`  customElements.define('${tn}', ${cn});\n`;
   o+=`}\n`;
 
-  // P1-19: For TypeScript, add export
-  if(ts) {
-    o+=`export default ${cn};\nexport {};\n`;
-  }
-
   // Close IIFE
   o += `\n})();\n`;
+
+  // P1-19: For TypeScript or ES module mode, add export after IIFE
+  if(ts) {
+    o+=`\nexport default ${cn};\nexport {};\n`;
+  }
 
   return { output: o, usedHelpers };
 }
@@ -2444,6 +2497,28 @@ function compile(source, fileName, options) {
         message: msg('E0003', { name: meta.name })
       }]
     };
+  }
+
+  // ─── Auto-import: resolve child components used in template ───
+  if (options?.componentRegistry) {
+    const usedTags = collectCustomElements(template);
+    const ownTag = meta.name;
+    const deps = resolveComponents(usedTags, options.componentRegistry);
+    for (const dep of deps) {
+      if (dep.tag === ownTag) continue; // Don't self-import
+      // Check if user already imported this path
+      const alreadyImported = script.some(d => d.kind === 'import' && d.from === dep.path);
+      if (!alreadyImported) {
+        script.unshift({
+          kind: 'import',
+          defaultImport: undefined,
+          namedImports: undefined,
+          from: dep.path,
+          span: { line: 0 },
+          _auto: true  // Mark as auto-generated
+        });
+      }
+    }
   }
 
   // Build AST
@@ -2663,10 +2738,57 @@ function appendSourceMapComment(code, mapFileName) {
 // Module Exports
 // ============================================================
 
+/**
+ * Collect all custom element tag names used in template AST.
+ *
+ * Walks the template recursively and extracts any tag containing a hyphen,
+ * which indicates a custom element (Web Component).
+ *
+ * @param {Array} nodes - Template AST nodes
+ * @returns {Set<string>} Set of custom element tag names
+ */
+function collectCustomElements(nodes) {
+  const tags = new Set();
+  (function walk(nodes) {
+    for (const n of nodes) {
+      if (n.kind === 'element' && n.tag && n.tag.includes('-')) {
+        tags.add(n.tag);
+      }
+      if (n.children) walk(n.children);
+      if (n.elseChildren) walk(n.elseChildren);
+      if (n.emptyChildren) walk(n.emptyChildren);
+      if (n.elseIfChain) for (const b of n.elseIfChain) { if (b.children) walk(b.children); }
+    }
+  })(nodes);
+  return tags;
+}
+
+/**
+ * Resolve component dependencies from template usage.
+ *
+ * Maps custom element tag names to their .flare source files based on
+ * a provided component registry (tag -> file path mapping).
+ *
+ * @param {Set<string>} usedTags - Custom element tags used in template
+ * @param {Object} registry - Map of tag name -> file path (e.g., {'my-btn': './my-btn.flare'})
+ * @returns {Array<{tag: string, path: string}>} Resolved component dependencies
+ */
+function resolveComponents(usedTags, registry) {
+  const deps = [];
+  for (const tag of usedTags) {
+    if (registry && registry[tag]) {
+      deps.push({ tag, path: registry[tag] });
+    }
+  }
+  return deps;
+}
+
 module.exports = {
   compile,              // Main API entry point
   splitBlocks,          // For testing/debugging
   parseTemplateNodes,   // For testing template parsing
   TypeChecker,          // For testing type checking
-  generate              // For testing code generation
+  generate,             // For testing code generation
+  collectCustomElements, // For resolving component dependencies
+  resolveComponents     // For auto-import resolution
 };

@@ -5,7 +5,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { compile, splitBlocks, parseTemplateNodes, TypeChecker, generate } = require('../lib/compiler.js');
+const { compile, splitBlocks, parseTemplateNodes, TypeChecker, generate, collectCustomElements, resolveComponents } = require('../lib/compiler.js');
 
 // ============================================================
 // HELPER ASSERTIONS
@@ -2869,3 +2869,192 @@ test('i18n: MESSAGES object contains all expected codes', () => {
 });
 
 console.log('\n✓ All i18n tests passed');
+
+// ============================================================
+// IMPORT STATEMENT OUTPUT TESTS
+// ============================================================
+console.log('\n── Import Statement Output Tests ──');
+
+test('import: default import is emitted before IIFE', () => {
+  const src = `<script>
+import Utils from "utils"
+state count: number = 0
+</script>
+<template><div>{{count}}</div></template>`;
+  const r = compile(src, 'my-app.flare');
+  assertSuccess(r);
+  // import should be at the top, before IIFE
+  assert.ok(r.output.indexOf("import Utils from 'utils'") < r.output.indexOf('(() => {'),
+    'import should appear before IIFE');
+});
+
+test('import: named imports are emitted', () => {
+  const src = `<script>
+import { format, parse } from "date-utils"
+state d: string = ""
+</script>
+<template><div>{{d}}</div></template>`;
+  const r = compile(src, 'my-app.flare');
+  assertSuccess(r);
+  assertContains(r.output, "import \\{ format, parse \\} from 'date-utils'");
+});
+
+test('import: namespace import is emitted', () => {
+  const src = `<script>
+import * as math from "mathlib"
+state x: number = 0
+</script>
+<template><div>{{x}}</div></template>`;
+  const r = compile(src, 'my-app.flare');
+  assertSuccess(r);
+  assertContains(r.output, "import \\* as math from 'mathlib'");
+});
+
+test('import: default + named combined import', () => {
+  const src = `<script>
+import React, { useState, useEffect } from "react"
+state v: number = 0
+</script>
+<template><div>{{v}}</div></template>`;
+  const r = compile(src, 'my-app.flare');
+  assertSuccess(r);
+  assertContains(r.output, "import React, \\{ useState, useEffect \\} from 'react'");
+});
+
+test('import: side-effect import (no bindings)', () => {
+  const src = `<script>
+import "./polyfills.js"
+state x: number = 0
+</script>
+<template><div>{{x}}</div></template>`;
+  const r = compile(src, 'my-app.flare');
+  assertSuccess(r);
+  assertContains(r.output, "import './polyfills\\.js'");
+});
+
+test('import: multiple imports are all emitted', () => {
+  const src = `<script>
+import { a } from "mod-a"
+import { b } from "mod-b"
+import c from "mod-c"
+state x: number = 0
+</script>
+<template><div>{{x}}</div></template>`;
+  const r = compile(src, 'my-app.flare');
+  assertSuccess(r);
+  assertContains(r.output, "import \\{ a \\} from 'mod-a'");
+  assertContains(r.output, "import \\{ b \\} from 'mod-b'");
+  assertContains(r.output, "import c from 'mod-c'");
+});
+
+test('import: no imports means no import block', () => {
+  const src = `<script>
+state x: number = 0
+</script>
+<template><div>{{x}}</div></template>`;
+  const r = compile(src, 'my-app.flare');
+  assertSuccess(r);
+  // Output should start with IIFE directly
+  assert.ok(r.output.trimStart().startsWith('(() =>'), 'No imports = IIFE starts directly');
+});
+
+console.log('✓ All import output tests passed');
+
+// ============================================================
+// :class ARRAY/STRING SYNTAX TESTS
+// ============================================================
+console.log('\n── :class Array/String Syntax Tests ──');
+
+test(':class with object syntax still works', () => {
+  const src = `<script>
+state active: boolean = true
+state highlight: boolean = false
+</script>
+<template><div :class="{ active: active, highlight: highlight }">test</div></template>`;
+  const r = compile(src, 'my-app.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'class=');
+  assertContains(r.output, 'Array\\.isArray');
+});
+
+test(':class with array syntax compiles', () => {
+  const src = `<script>
+state active: boolean = true
+</script>
+<template><div :class="['base', active && 'active']">test</div></template>`;
+  const r = compile(src, 'my-app.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'class=');
+  assertContains(r.output, 'Array\\.isArray');
+});
+
+test(':class with string expression compiles', () => {
+  const src = `<script>
+state cls: string = "red"
+</script>
+<template><div :class="cls">test</div></template>`;
+  const r = compile(src, 'my-app.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'class=');
+});
+
+console.log('✓ All :class syntax tests passed');
+
+// ============================================================
+// COMPONENT AUTO-IMPORT TESTS
+// ============================================================
+console.log('\n── Component Auto-Import Tests ──');
+
+test('collectCustomElements: finds custom elements in template', () => {
+  const nodes = parseTemplateNodes('<div><my-button>Click</my-button><span>text</span><x-icon /></div>');
+  const tags = collectCustomElements(nodes);
+  assert.ok(tags.has('my-button'));
+  assert.ok(tags.has('x-icon'));
+  assert.ok(!tags.has('div'));
+  assert.ok(!tags.has('span'));
+});
+
+test('collectCustomElements: finds nested custom elements', () => {
+  const nodes = parseTemplateNodes('<my-card><my-header>Title</my-header></my-card>');
+  const tags = collectCustomElements(nodes);
+  assert.ok(tags.has('my-card'));
+  assert.ok(tags.has('my-header'));
+});
+
+test('resolveComponents: maps tags to file paths', () => {
+  const tags = new Set(['my-button', 'my-card', 'unknown-tag']);
+  const registry = { 'my-button': './my-button.js', 'my-card': './my-card.js' };
+  const deps = resolveComponents(tags, registry);
+  assert.strictEqual(deps.length, 2);
+  assert.ok(deps.some(d => d.tag === 'my-button' && d.path === './my-button.js'));
+  assert.ok(deps.some(d => d.tag === 'my-card' && d.path === './my-card.js'));
+});
+
+test('auto-import: injects side-effect import for child components', () => {
+  const src = `<script>
+state label: string = "hi"
+</script>
+<template><div><my-button>{{label}}</my-button></div></template>`;
+  const registry = { 'my-button': './my-button.js', 'my-app': './my-app.js' };
+  const r = compile(src, 'my-app.flare', { componentRegistry: registry });
+  assertSuccess(r);
+  assertContains(r.output, "import './my-button\\.js'");
+  // Should NOT self-import
+  assertNotContains(r.output, "import './my-app\\.js'");
+});
+
+test('auto-import: does not duplicate existing user import', () => {
+  const src = `<script>
+import "./my-button.js"
+state label: string = "hi"
+</script>
+<template><div><my-button>{{label}}</my-button></div></template>`;
+  const registry = { 'my-button': './my-button.js' };
+  const r = compile(src, 'my-app.flare', { componentRegistry: registry });
+  assertSuccess(r);
+  // Should appear only once
+  const matches = r.output.match(/import '\.\/my-button\.js'/g);
+  assert.strictEqual(matches.length, 1, 'Should not duplicate import');
+});
+
+console.log('✓ All component auto-import tests passed');
