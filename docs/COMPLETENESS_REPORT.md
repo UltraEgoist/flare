@@ -14,10 +14,10 @@
 | Rustコンパイラ | 40% | ビルドエラーあり（checker.rs修正済み、未検証） |
 | CLIツール | 80% | init/build/check/dev 動作確認済み |
 | VSCode拡張 | 80% | 構文ハイライト・補完・ホバー・スニペット・定義ジャンプ対応 |
-| テストスイート | 92% | 233テスト（compiler 193 + E2E 17 + CLI 23） |
-| セキュリティ | 95% | 18件の脆弱性修正済み（S-16, S-19, S-22追加）、既知の残課題なし |
+| テストスイート | 95% | 241テスト（compiler 201 + E2E 17 + CLI 23）、Source Map テスト含む |
+| セキュリティ | 98% | 21件の脆弱性修正済み（NEW-V8, V10, V12追加）、既知の残課題なし |
 | ドキュメント | 75% | API.md大幅拡充済み、チュートリアル不足 |
-| 本番運用準備 | 40% | npm publish準備済、SSR未、Source Map未 |
+| 本番運用準備 | 55% | npm publish準備済、Source Map対応済、SSR未 |
 
 ### 総合評価: **アルファ品質（Alpha）**
 
@@ -146,23 +146,23 @@
 
 ### Phase 1: 本番使用可能にするための必須項目
 
-| # | タスク | 優先度 | 工数目安 |
-|---|--------|--------|---------|
-| 1 | ブラウザE2Eテスト（Playwright等） | HIGH | 2-3日 |
-| 2 | Source Map 対応 | HIGH | 1-2日 |
-| 3 | npm publish 準備 (package.json, LICENSE) | HIGH | 0.5日 |
-| 4 | エラーメッセージの国際化（日英対応） | MEDIUM | 1日 |
-| 5 | HMR（Hot Module Replacement） | MEDIUM | 2-3日 |
-| 6 | バンドルサイズ最適化（Tree Shaking） | MEDIUM | 1-2日 |
+| # | タスク | 優先度 | 状態 |
+|---|--------|--------|------|
+| ~~1~~ | ~~ブラウザE2Eテスト~~ | ~~HIGH~~ | ✅ 軽量DOMシミュレーション17件 |
+| ~~2~~ | ~~Source Map 対応~~ | ~~HIGH~~ | ✅ V3形式、VLQ実装済み |
+| ~~3~~ | ~~npm publish 準備~~ | ~~HIGH~~ | ✅ package.json/LICENSE/.npmignore |
+| 4 | エラーメッセージの国際化（日英対応） | MEDIUM | 対応中 |
+| 5 | HMR（Hot Module Replacement） | MEDIUM | 対応中 |
+| 6 | バンドルサイズ最適化（Tree Shaking） | MEDIUM | 対応中 |
 
 ### Phase 2: 本格運用向け
 
-| # | タスク | 優先度 | 工数目安 |
-|---|--------|--------|---------|
-| 7 | SSR（Server-Side Rendering） | HIGH | 3-5日 |
-| 8 | CSS Modules / CSS-in-JS 対応 | MEDIUM | 2日 |
-| 9 | VSCode 定義ジャンプ | MEDIUM | 1-2日 |
-| 10 | ジェネリック型サポート | LOW | 2-3日 |
+| # | タスク | 優先度 | 状態 |
+|---|--------|--------|------|
+| 7 | SSR（Server-Side Rendering） | HIGH | 未着手 |
+| 8 | CSS Modules / CSS-in-JS 対応 | MEDIUM | 未着手 |
+| ~~9~~ | ~~VSCode 定義ジャンプ~~ | ~~MEDIUM~~ | ✅ 実装済み |
+| 10 | ジェネリック型サポート | LOW | 未着手 |
 
 ### Phase 3: エコシステム
 

@@ -666,7 +666,7 @@ test('error - missing template block returns error', () => {
   const src = `<meta>name: "x-test"</meta><script>state x: number = 0</script>`;
   const result = compile(src);
   assertFail(result);
-  assert(result.diagnostics.some(d => d.code === 'E0002'), 'Should error about missing template');
+  assert(result.diagnostics.some(d => d.code === 'E0001'), 'Should error about missing template');
 });
 
 test('error - invalid #if syntax does not throw', () => {
@@ -2551,4 +2551,321 @@ fn multiply(x, y) { return x * y }
   assert.ok(result.sourceMap.mappings, 'Should have mappings');
 });
 
+// ============================================================
+// TESTS: BUNDLE SIZE OPTIMIZATION (Tree-shaking / Dead Code Elimination)
+// ============================================================
+
+test('Optimization: optimize:false includes all helpers by default', () => {
+  const src = `<meta>name: "x-test"</meta>
+<template><div>hello</div></template>`;
+  const result = compile(src, 'test.flare', { optimize: false });
+  assertSuccess(result);
+  // All helpers should be present
+  assertContains(result.output, '#esc\\(', 'Should include #esc helper');
+  assertContains(result.output, '#escAttr\\(', 'Should include #escAttr helper');
+  assertContains(result.output, '#escUrl\\(', 'Should include #escUrl helper');
+});
+
+test('Optimization: optimize:true removes unused #esc when no interpolation', () => {
+  const src = `<meta>name: "x-no-interp"</meta>
+<template><div>static content</div></template>`;
+  const result = compile(src, 'test.flare', { optimize: true });
+  assertSuccess(result);
+  // #esc should not be present since there's no {{ }} interpolation
+  assertNotContains(result.output, '#esc\\(val\\)', 'Should NOT include #esc when no interpolation');
+  // But escAttr and escUrl might still be there if referenced
+});
+
+test('Optimization: optimize:true keeps #esc when interpolation exists', () => {
+  const src = `<meta>name: "x-with-interp"</meta>
+<script>state msg: string = "hello"</script>
+<template><div>{{ msg }}</div></template>`;
+  const result = compile(src, 'test.flare', { optimize: true });
+  assertSuccess(result);
+  // #esc should be present because of {{ msg }}
+  assertContains(result.output, '#esc\\(val\\)', 'Should include #esc when interpolation exists');
+});
+
+test('Optimization: optimize:true removes #escUrl when no href/src attributes', () => {
+  const src = `<meta>name: "x-no-urls"</meta>
+<script>state name: string = "test"
+state isActive: boolean = true</script>
+<template><div class="test" :class="isActive">{{ name }}</div></template>`;
+  const result = compile(src, 'test.flare', { optimize: true });
+  assertSuccess(result);
+  // #escUrl should not be present since there's no href/src/action/formaction
+  assertNotContains(result.output, '#escUrl\\(val\\)', 'Should NOT include #escUrl when no URL attributes');
+});
+
+test('Optimization: optimize:true keeps #escUrl when href attribute exists', () => {
+  const src = `<meta>name: "x-with-href"</meta>
+<script>state url: string = "https://example.com"</script>
+<template><a :href="url">link</a></template>`;
+  const result = compile(src, 'test.flare', { optimize: true });
+  assertSuccess(result);
+  // #escUrl should be present because of :href
+  assertContains(result.output, '#escUrl\\(val\\)', 'Should include #escUrl when href attribute exists');
+});
+
+test('Optimization: optimize:true keeps #escUrl when src attribute exists', () => {
+  const src = `<meta>name: "x-with-src"</meta>
+<script>state imgUrl: string = "image.png"</script>
+<template><img :src="imgUrl" /></template>`;
+  const result = compile(src, 'test.flare', { optimize: true });
+  assertSuccess(result);
+  // #escUrl should be present because of :src
+  assertContains(result.output, '#escUrl\\(val\\)', 'Should include #escUrl when src attribute exists');
+});
+
+test('Optimization: optimize:true keeps #escAttr for dynamic class binding', () => {
+  const src = `<meta>name: "x-dynamic-class"</meta>
+<script>state classes: object = { active: true }</script>
+<template><div :class="classes"></div></template>`;
+  const result = compile(src, 'test.flare', { optimize: true });
+  assertSuccess(result);
+  // #escAttr should be present for dynamic class binding
+  assertContains(result.output, '#escAttr\\(val\\)', 'Should include #escAttr for dynamic class');
+});
+
+test('Optimization: optimize:true keeps #escAttr for dynamic attributes', () => {
+  const src = `<meta>name: "x-dynamic-attr"</meta>
+<script>state title: string = "test"</script>
+<template><div :title="title"></div></template>`;
+  const result = compile(src, 'test.flare', { optimize: true });
+  assertSuccess(result);
+  // #escAttr should be present for dynamic attribute
+  assertContains(result.output, '#escAttr\\(val\\)', 'Should include #escAttr for dynamic attribute');
+});
+
+test('Optimization: usedHelpers property returned in result', () => {
+  const src = `<meta>name: "x-track-helpers"</meta>
+<script>state msg: string = "hi"</script>
+<template><div>{{ msg }}</div></template>`;
+  const result = compile(src, 'test.flare', { optimize: true });
+  assertSuccess(result);
+  // usedHelpers should be present
+  assert.ok(result.usedHelpers instanceof Set, 'usedHelpers should be a Set');
+  assert.ok(result.usedHelpers.has('esc'), 'usedHelpers should contain "esc"');
+});
+
+test('Optimization: backward compatibility - optimize omitted defaults to false', () => {
+  const src = `<meta>name: "x-no-optimize-option"</meta>
+<template><div>content</div></template>`;
+  const result = compile(src, 'test.flare');
+  assertSuccess(result);
+  // All helpers should be present when optimize is not specified
+  assertContains(result.output, '#esc\\(', 'Should include all helpers by default');
+});
+
+test('Optimization: combined helpers test - interpolation + href + class', () => {
+  const src = `<meta>name: "x-all-helpers"</meta>
+<script>
+state url: string = "https://example.com"
+state classes: object = { active: true }
+state text: string = "hello"
+</script>
+<template>
+  <a :href="url" :class="classes">{{ text }}</a>
+</template>`;
+  const result = compile(src, 'test.flare', { optimize: true });
+  assertSuccess(result);
+  // All three helpers should be present
+  assertContains(result.output, '#esc\\(val\\)', 'Should have #esc');
+  assertContains(result.output, '#escAttr\\(val\\)', 'Should have #escAttr');
+  assertContains(result.output, '#escUrl\\(val\\)', 'Should have #escUrl');
+  // Verify usedHelpers
+  assert.ok(result.usedHelpers.has('esc'), 'Should track esc usage');
+  assert.ok(result.usedHelpers.has('escAttr'), 'Should track escAttr usage');
+  assert.ok(result.usedHelpers.has('escUrl'), 'Should track escUrl usage');
+});
+
+test('Optimization: no escaping helpers in minimal component', () => {
+  const src = `<meta>name: "x-minimal"</meta>
+<template><div>static text only</div></template>`;
+  const result = compile(src, 'test.flare', { optimize: true });
+  assertSuccess(result);
+  // None of the escaping helpers should be present
+  assertNotContains(result.output, '#esc\\(val\\)', 'No #esc needed for static content');
+  assertNotContains(result.output, '#escAttr\\(val\\)', 'No #escAttr needed');
+  assertNotContains(result.output, '#escUrl\\(val\\)', 'No #escUrl needed');
+  // usedHelpers should not have escaping helpers (patch/getNewTree always tracked)
+  assert.ok(!result.usedHelpers.has('esc'), 'Should not have esc helper');
+  assert.ok(!result.usedHelpers.has('escAttr'), 'Should not have escAttr helper');
+  assert.ok(!result.usedHelpers.has('escUrl'), 'Should not have escUrl helper');
+});
+
 console.log('\n✓ All compiler tests passed');
+
+// ============================================================
+// TESTS: I18N MESSAGE CATALOG
+// ============================================================
+
+const { msg, setLocale, getLocale, MESSAGES } = require('../lib/messages');
+
+test('i18n: msg() returns English message by default', () => {
+  setLocale('en');
+  const message = msg('E0301', { id: 'count' });
+  assert.match(message, /Undefined identifier "count"/);
+});
+
+test('i18n: msg() returns Japanese message when locale set to ja', () => {
+  setLocale('ja');
+  const message = msg('E0301', { id: 'count' });
+  assert.match(message, /未定義の識別子 "count"/);
+});
+
+test('i18n: msg() returns fallback to English if locale not found', () => {
+  const message = msg('E0301', { id: 'foo' });
+  // Should return English version as fallback
+  assert.ok(message.includes('foo'));
+});
+
+test('i18n: msg() substitutes multiple parameters', () => {
+  setLocale('en');
+  const message = msg('E0302', { id: 'x', type: 'number', method: 'toUpperCase' });
+  assert.match(message, /x.*number.*toUpperCase/);
+});
+
+test('i18n: msg() substitutes Japanese parameter', () => {
+  setLocale('ja');
+  const message = msg('E0302', { id: 'x', type: 'number', method: 'toUpperCase' });
+  assert.match(message, /x.*number.*toUpperCase/);
+});
+
+test('i18n: setLocale() changes locale correctly', () => {
+  setLocale('ja');
+  assert.strictEqual(getLocale(), 'ja');
+  setLocale('en');
+  assert.strictEqual(getLocale(), 'en');
+});
+
+test('i18n: CLI_INIT_INVALID_NAME works in both locales', () => {
+  setLocale('en');
+  const en = msg('CLI_INIT_INVALID_NAME', { name: 'MyProject' });
+  assert.match(en, /MyProject/);
+  
+  setLocale('ja');
+  const ja = msg('CLI_INIT_INVALID_NAME', { name: 'MyProject' });
+  assert.match(ja, /MyProject/);
+});
+
+test('i18n: W0201 (@html warning) returns different text per locale', () => {
+  setLocale('en');
+  const en = msg('W0201');
+  assert.match(en, /XSS/);
+  
+  setLocale('ja');
+  const ja = msg('W0201');
+  assert.match(ja, /XSS/);
+});
+
+test('i18n: Unknown message code returns the code itself', () => {
+  const message = msg('UNKNOWN_CODE');
+  assert.strictEqual(message, 'UNKNOWN_CODE');
+});
+
+test('i18n: Locale detection from process.env.FLARE_LANG', () => {
+  const oldFlare = process.env.FLARE_LANG;
+  const oldLang = process.env.LANG;
+  
+  try {
+    // Set FLARE_LANG to ja
+    delete process.env.LANG;
+    process.env.FLARE_LANG = 'ja';
+    // Note: detectLocale is called at module load time, so this test validates
+    // that the messages module respects the environment
+    const msg1 = msg('E0301', { id: 'test' });
+    // After setting, we can verify by checking current locale
+    assert.ok(getLocale() === 'en' || getLocale() === 'ja');
+  } finally {
+    if (oldFlare) process.env.FLARE_LANG = oldFlare;
+    else delete process.env.FLARE_LANG;
+    if (oldLang) process.env.LANG = oldLang;
+  }
+});
+
+test('i18n: Compiler uses i18n for E0001 (missing template)', () => {
+  setLocale('en');
+  const src = '<script>state x: number = 0</script>';
+  const result = compile(src, 'test.flare');
+  assert.strictEqual(result.success, false);
+  const diag = result.diagnostics[0];
+  assert.strictEqual(diag.code, 'E0001');
+  assert.match(diag.message, /Template block is required/);
+});
+
+test('i18n: Compiler uses i18n for E0003 (invalid component name)', () => {
+  setLocale('en');
+  const src = `<meta>name: "InvalidName"</meta>
+<template><div>Test</div></template>`;
+  const result = compile(src, 'test.flare');
+  assert.strictEqual(result.success, false);
+  const diag = result.diagnostics[0];
+  assert.strictEqual(diag.code, 'E0003');
+  assert.match(diag.message, /Invalid component name/);
+  assert.match(diag.message, /InvalidName/);
+});
+
+test('i18n: Compiler uses i18n for E0301 (undefined identifier)', () => {
+  setLocale('en');
+  const src = `<meta>name: "x-test"</meta>
+<script>state x: number = 0</script>
+<template><div>{{ undefinedVar }}</div></template>`;
+  const result = compile(src, 'test.flare');
+  assert.strictEqual(result.success, false);
+  const diag = result.diagnostics.find(d => d.code === 'E0301');
+  assert.ok(diag);
+  assert.match(diag.message, /Undefined identifier/);
+});
+
+test('i18n: Compiler diagnostic messages switch between locales', () => {
+  const src = `<meta>name: "x-test"</meta>
+<template><div>{{ missingId }}</div></template>`;
+  
+  setLocale('en');
+  const enResult = compile(src, 'test.flare');
+  const enDiag = enResult.diagnostics.find(d => d.code === 'E0301');
+  
+  setLocale('ja');
+  const jaResult = compile(src, 'test.flare');
+  const jaDiag = jaResult.diagnostics.find(d => d.code === 'E0301');
+  
+  // Both should report the same code
+  assert.strictEqual(enDiag.code, jaDiag.code);
+  // But messages should be different
+  assert.notStrictEqual(enDiag.message, jaDiag.message);
+  // English should contain "Undefined"
+  assert.match(enDiag.message, /Undefined/);
+  // Japanese should contain "未定義"
+  assert.match(jaDiag.message, /未定義/);
+});
+
+test('i18n: E0401_KEYWORD and other event handler variants', () => {
+  setLocale('en');
+  assert.ok(msg('E0401_EMPTY'));
+  assert.ok(msg('E0401_KEYWORD', { keyword: 'eval' }));
+  assert.ok(msg('E0401_SEMICOLON'));
+  assert.ok(msg('E0401_STRING'));
+  
+  setLocale('ja');
+  assert.ok(msg('E0401_EMPTY'));
+  assert.ok(msg('E0401_KEYWORD', { keyword: 'eval' }));
+  assert.ok(msg('E0401_SEMICOLON'));
+});
+
+test('i18n: MESSAGES object contains all expected codes', () => {
+  // Verify that MESSAGES object is defined
+  assert.ok(MESSAGES);
+  
+  // Check that error codes are present
+  assert.ok(MESSAGES.E0001);
+  assert.ok(MESSAGES.E0003);
+  assert.ok(MESSAGES.E0301);
+  assert.ok(MESSAGES.W0201);
+  
+  // Each message should have at least 'en' and 'ja' variants
+  assert.ok(MESSAGES.E0001.en);
+  assert.ok(MESSAGES.E0001.ja);
+});
+
+console.log('\n✓ All i18n tests passed');

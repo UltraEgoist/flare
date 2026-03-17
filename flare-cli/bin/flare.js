@@ -37,7 +37,9 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 const { compile } = require('../lib/compiler');
+const { msg } = require('../lib/messages');
 
 const VERSION = '0.1.0';
 const args = process.argv.slice(2);
@@ -124,13 +126,13 @@ function cmdInit() {
   // プロジェクト名がパッケージ名として有効か検証
   // これにより npm publish 時のエラーを事前に防ぐ
   if (!/^[a-z0-9][-a-z0-9_.]*$/.test(name)) {
-    console.error(c.err(`無効なプロジェクト名: '${name}'. 小文字、数字、ハイフン、アンダースコア、ドットのみ使用できます`));
+    console.error(c.err(msg('CLI_INIT_INVALID_NAME', {name})));
     process.exit(1);
   }
 
   const dir = path.resolve(name);
   // 既存ディレクトリの存在確認（既存プロジェクトへの誤上書き防止）
-  if (fs.existsSync(dir)) { console.error(c.err(`ディレクトリ '${name}' は既に存在します`)); process.exit(1); }
+  if (fs.existsSync(dir)) { console.error(c.err(msg('CLI_INIT_EXISTS', {dir: name}))); process.exit(1); }
 
   console.log(`\n  ${c.info('▸')} ${c.b('Creating')} ${name}/\n`);
 
@@ -312,9 +314,11 @@ function cmdBuild() {
   const outDir = path.resolve(getArg('--outdir') || config.outdir || 'dist');
   const target = getArg('--target') || config.target || 'js';
   const bundleName = config.bundle || 'flare-bundle.js';
+  // NEW-OPT: Enable bundle size optimization (tree-shaking) for bundle files
+  const optimize = getArg('--optimize') === 'true' || config.optimize === true;
 
   if (!fs.existsSync(srcDir)) {
-    console.error(c.err(`ソースディレクトリが見つかりません: ${srcDir}`));
+    console.error(c.err(msg('CLI_BUILD_NO_SRC', {path: srcDir})));
     process.exit(1);
   }
 
@@ -326,12 +330,13 @@ function cmdBuild() {
   // ソースディレクトリから全 .flare ファイルを再帰的に探索
   const files = collectFlareFiles(srcDir);
   if (files.length === 0) {
-    console.error(c.err(`.flare ファイルが見つかりません: ${srcDir}`));
+    console.error(c.err(msg('CLI_BUILD_NO_FILES', {path: srcDir})));
     process.exit(1);
   }
 
   let success = 0, fail = 0;
   const bundleParts = [];
+  const allUsedHelpers = new Set();  // Track helpers used across all components (for bundle optimization)
 
   // 各 .flare ファイルをコンパイル
   for (const file of files) {
@@ -340,7 +345,8 @@ function cmdBuild() {
     console.log(`${c.b('▸')} Compiling ${fileName}...`);
 
     // コンパイラ実行（../lib/compiler の compile() 関数を使用）
-    const result = compile(source, fileName, { target });
+    // NEW-OPT: Pass optimize flag to enable tree-shaking
+    const result = compile(source, fileName, { target, optimize });
 
     // 診断情報（エラー/警告）を表示
     for (const d of result.diagnostics) {
@@ -369,6 +375,13 @@ function cmdBuild() {
       // Bundle に追加するため、コンパイル済みソースコードを蓄積
       // （コメント区切り付き）
       bundleParts.push(`// ── ${fileName} ──\n${result.output}`);
+
+      // NEW-OPT: Collect all used helpers across components for shared extraction
+      if (optimize && result.usedHelpers) {
+        for (const helper of result.usedHelpers) {
+          allUsedHelpers.add(helper);
+        }
+      }
       success++;
     } else {
       console.log(`  ${c.err('✗ Failed')}`);
@@ -435,7 +448,7 @@ function cmdCheck() {
   const target = getArg('--target') || config.target || 'js';
 
   if (!fs.existsSync(srcDir)) {
-    console.error(c.err(`ソースディレクトリが見つかりません: ${srcDir}`));
+    console.error(c.err(msg('CLI_BUILD_NO_SRC', {path: srcDir})));
     process.exit(1);
   }
 
@@ -473,13 +486,19 @@ function cmdCheck() {
 // ═══════════════════════════════════════════
 
 /**
- * 開発サーバーを起動する（ホットリビルド対応）
+ * 開発サーバーを起動する（ホットモジュールリプレースメント対応）
  *
  * 機能：
  * 1. 初期ビルド：ソースディレクトリの .flare ファイルをコンパイル
  * 2. ファイル監視：.flare ファイルの変更を検知 → デバウンス付き自動リビルド
- * 3. 静的ファイルサーバー：HTML、CSS、JS などを localhost:PORT で配信
- * 4. セキュリティ対策：
+ * 3. HMR（ホットモジュールリプレースメント）：
+ *    - 変更されたコンポーネントのみをリコンパイル
+ *    - WebSocket経由で新しいコンポーネントコードをブラウザに送信
+ *    - ブラウザ側でコンポーネントを再評価して再レンダリング
+ *    - HMR失敗時は自動的にフルページリロードにフォールバック
+ *    - --no-hmr フラグで無効化可能
+ * 4. 静的ファイルサーバー：HTML、CSS、JS などを localhost:PORT で配信
+ * 5. セキュリティ対策：
  *    - パストラバーサル攻撃防止
  *    - シンリンク解決と allowedRoots チェック
  *    - CORS / CSP ヘッダ設定
@@ -489,12 +508,10 @@ function cmdCheck() {
  * ファイル変更イベントは頻繁に発火するため、150ms のデバウンスで
  * リビルド実行を制御 → 不要なコンパイル回数を削減
  *
- * ## セキュリティ実装
- * - Path Traversal 防止：URL から ".." や "\0" を検出 → 403 拒否
- * - Symlink 解決：fs.realpathSync() で実パスを取得
- * - Allowed Roots チェック：解決済みパスが allowedRoots 以下にあることを確認
- * - CORS ヘッダ：開発時に外部からのリソース読み込みを許可（'*'）
- * - CSP ヘッダ：'unsafe-inline' / 'unsafe-eval' を許可（開発用。本番では制限すべき）
+ * ## HMR プロトコル
+ * WebSocket メッセージ形式：
+ * - HMR 更新: { type: 'hmr-update', component: 'x-counter', code: '...' }
+ * - フルリロード: { type: 'reload' }
  *
  * @function cmdDev
  * @returns {void}
@@ -507,8 +524,11 @@ function cmdDev() {
   // CLI引数からポート番号を取得（デフォルト 3000）
   // NEW-V8: ポート番号の範囲バリデーション
   const port = parseInt(getArg('--port') || '3000', 10);
+  // HMR の有効/無効を判定（デフォルト：有効）
+  const hmrEnabled = !args.includes('--no-hmr');
+
   if (isNaN(port) || port < 1 || port > 65535) {
-    console.error(`${C.red}エラー:${C.reset} 無効なポート番号です（1〜65535の範囲で指定してください）`);
+    console.error(`${c.red}エラー:${c.reset} 無効なポート番号です（1〜65535の範囲で指定してください）`);
     process.exit(1);
   }
 
@@ -517,6 +537,9 @@ function cmdDev() {
 
   // 初期ビルド実行
   buildAll(srcDir, outDir);
+
+  // HMR 用の WebSocket クライアントセット
+  const wsClients = new Set();
 
   // ファイル監視開始
   // .flare ファイルの変更を検知して自動リビルド
@@ -527,13 +550,24 @@ function cmdDev() {
     if (debounce) clearTimeout(debounce);
     // デバウンス：150ms 以内の連続変更は1回の再ビルドにまとめる
     debounce = setTimeout(() => {
+      const filePath = path.join(srcDir, filename);
       console.log(`\n${c.info('▸')} ${filename} changed, recompiling...`);
       // P2-38: Wrap buildAll in try/catch to handle build failures gracefully
       // ビルド失敗がサーバーを停止させないよう、エラーハンドリングを実装
       try {
-        buildAll(srcDir, outDir);
+        if (hmrEnabled) {
+          // HMR モード：変更ファイルのみを再コンパイル
+          recompileFile(filePath, srcDir, outDir, wsClients);
+        } else {
+          // フルリビルド
+          buildAll(srcDir, outDir);
+          // HMR無効時はフルリロード送信
+          broadcastReload(wsClients);
+        }
       } catch (err) {
         console.error(c.err(`Build error: ${err.message}`));
+        // エラー時はフルリロードにフォールバック
+        broadcastReload(wsClients);
       }
     }, 150);
   });
@@ -548,6 +582,128 @@ function cmdDev() {
     '.ts': 'text/typescript', '.jsx': 'text/jsx', '.tsx': 'text/tsx',
     '.wasm': 'application/wasm', '.mjs': 'text/javascript',
   };
+
+  // HMR ランタイムスクリプト：ブラウザが実行するコード
+  const HMR_RUNTIME = `
+(function() {
+  let socket = null;
+  let connected = false;
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = protocol + '//' + location.host;
+
+  function connect() {
+    socket = new WebSocket(wsUrl);
+    socket.onopen = () => {
+      connected = true;
+      console.log('[HMR] Connected');
+    };
+    socket.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'hmr-update') {
+          handleHMRUpdate(msg);
+        } else if (msg.type === 'reload') {
+          location.reload();
+        }
+      } catch (err) {
+        console.error('[HMR] Message parse error:', err);
+      }
+    };
+    socket.onerror = (err) => {
+      console.error('[HMR] WebSocket error:', err);
+    };
+    socket.onclose = () => {
+      connected = false;
+      console.log('[HMR] Disconnected, reconnecting in 2s...');
+      setTimeout(connect, 2000);
+    };
+  }
+
+  function handleHMRUpdate(msg) {
+    try {
+      const { component, code } = msg;
+      if (!component || !code) {
+        console.error('[HMR] Invalid message format');
+        return;
+      }
+
+      // 新しいコンポーネントコードを実行してクラスを再定義
+      try {
+        eval(code);
+      } catch (err) {
+        console.error('[HMR] Failed to evaluate component code:', err);
+        // コード評価失敗時はフルリロード
+        location.reload();
+        return;
+      }
+
+      // DOM内のコンポーネント要素を全て検索
+      const elements = document.querySelectorAll(component);
+      if (elements.length === 0) {
+        console.log('[HMR] No elements found for', component);
+        return;
+      }
+
+      console.log('[HMR] Updating', component, 'count:', elements.length);
+
+      // 各要素を更新試行
+      for (const el of elements) {
+        try {
+          // 新しいクラス定義を取得（コンポーネント変数として存在するはず）
+          const className = getComponentClassName(component);
+          if (!className) {
+            console.warn('[HMR] Could not find class for', component);
+            location.reload();
+            return;
+          }
+
+          // 状態を保存（最善の努力）
+          const savedState = el.__flareState ? JSON.parse(JSON.stringify(el.__flareState)) : {};
+
+          // 要素を新しいインスタンスで置き換え（状態保持の改善版）
+          // shadowDOM の内容をクリア（再レンダリングをトリガー）
+          if (el.shadowRoot) {
+            el.shadowRoot.innerHTML = '';
+          }
+
+          // connectedCallback を手動呼び出してリセット
+          if (el.connectedCallback) {
+            el.connectedCallback();
+          }
+
+          // 状態を復元試行
+          if (savedState && Object.keys(savedState).length > 0) {
+            try {
+              Object.assign(el.__flareState || {}, savedState);
+            } catch (e) {
+              // 状態復元失敗は無視（デフォルト値を使用）
+            }
+          }
+        } catch (err) {
+          console.error('[HMR] Failed to update element', component, ':', err);
+          location.reload();
+          return;
+        }
+      }
+
+      console.log('[HMR] Successfully updated', component);
+    } catch (err) {
+      console.error('[HMR] Update handler error:', err);
+      location.reload();
+    }
+  }
+
+  function getComponentClassName(tagName) {
+    // コンポーネント変数名を推測（例：x-counter → XCounter）
+    const parts = tagName.split('-');
+    const className = parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('');
+    return className;
+  }
+
+  // 接続開始
+  connect();
+})();
+`;
 
   const server = http.createServer((req, res) => {
     // URL の正規化：ルート "/" は index.html にマップ
@@ -634,6 +790,30 @@ function cmdDev() {
           'Access-Control-Allow-Origin': '*',  // 開発時は全オリジンを許可
           'Content-Security-Policy': "default-src 'self' 'unsafe-inline'",  // S-06: unsafe-eval を除去
         });
+
+        // HTML ファイルの場合、HMR ランタイムを注入
+        if (ext === '.html' && hmrEnabled) {
+          const htmlContent = fs.readFileSync(realPath, 'utf-8');
+          // </head> または </body> の直前に HMR スクリプトを注入
+          let injected = htmlContent.replace(
+            '</head>',
+            `<script>${HMR_RUNTIME}</script>\n</head>`
+          );
+          // </head> がない場合は </body> の直前に注入
+          if (injected === htmlContent) {
+            injected = htmlContent.replace(
+              '</body>',
+              `<script>${HMR_RUNTIME}</script>\n</body>`
+            );
+          }
+          // それでもない場合は末尾に追加
+          if (injected === htmlContent) {
+            injected += `\n<script>${HMR_RUNTIME}</script>`;
+          }
+          res.end(injected);
+          return;
+        }
+
         // ファイルをストリーム形式で送信（大きなファイルでもメモリ効率的）
         fs.createReadStream(realPath).pipe(res);
         return;
@@ -644,6 +824,39 @@ function cmdDev() {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('404 Not Found');
   });
+
+  // WebSocket アップグレードハンドラー（HMR用）
+  if (hmrEnabled) {
+    server.on('upgrade', (req, socket, head) => {
+      if (req.url === '/') {
+        // WebSocket ハンドシェイク処理
+        const key = req.headers['sec-websocket-key'];
+        const hash = crypto
+          .createHash('sha1')
+          .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+          .digest('base64');
+
+        socket.write(
+          'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: ' + hash + '\r\n' +
+          '\r\n'
+        );
+
+        // WebSocket コネクションをクライアントセットに追加
+        wsClients.add(socket);
+        socket.on('close', () => {
+          wsClients.delete(socket);
+        });
+        socket.on('error', () => {
+          wsClients.delete(socket);
+        });
+      } else {
+        socket.destroy();
+      }
+    });
+  }
 
   // P2-37: Add error handler for port conflicts
   // ポート使用中エラーを処理して、分かりやすいエラーメッセージを表示
@@ -658,9 +871,202 @@ function cmdDev() {
   });
 
   server.listen(port, () => {
-    console.log(`${c.ok('▸')} Dev server: ${c.b(`http://localhost:${port}`)}`);
+    if (hmrEnabled) {
+      console.log(`${c.ok('▸')} Dev server: ${c.b(`http://localhost:${port}`)} ${c.d('(HMR enabled)')}`);
+    } else {
+      console.log(`${c.ok('▸')} Dev server: ${c.b(`http://localhost:${port}`)} ${c.d('(HMR disabled)')}`);
+    }
     console.log(`${c.d('  Ctrl+C to stop')}\n`);
   });
+}
+
+// ─── HMR helpers ───
+
+/**
+ * WebSocket クライアントにメッセージをブロードキャストする
+ *
+ * @param {Set<Socket>} clients - WebSocket クライアントセット
+ * @param {Object} msg - 送信するメッセージ
+ * @returns {void}
+ */
+function broadcastMessage(clients, msg) {
+  const data = JSON.stringify(msg);
+  // WebSocket フレームを作成（バイナリ小）
+  const payload = Buffer.from(data);
+  const frame = encodeWebSocketFrame(payload);
+  for (const client of clients) {
+    try {
+      client.write(frame);
+    } catch (err) {
+      // クライアントへの送信失敗は無視
+    }
+  }
+}
+
+/**
+ * フルページリロード指令をブロードキャスト
+ *
+ * @param {Set<Socket>} clients - WebSocket クライアントセット
+ * @returns {void}
+ */
+function broadcastReload(clients) {
+  broadcastMessage(clients, { type: 'reload' });
+}
+
+/**
+ * HMR 更新メッセージをブロードキャスト
+ *
+ * @param {Set<Socket>} clients - WebSocket クライアントセット
+ * @param {string} component - コンポーネント名（タグ名）
+ * @param {string} code - コンポーネントのコード
+ * @returns {void}
+ */
+function broadcastHMRUpdate(clients, component, code) {
+  broadcastMessage(clients, {
+    type: 'hmr-update',
+    component,
+    code,
+  });
+}
+
+/**
+ * シンプルな WebSocket フレームエンコーディング
+ * RFC 6455 に準拠した最小限の実装
+ *
+ * @param {Buffer} payload - ペイロード
+ * @returns {Buffer} エンコードされたフレーム
+ */
+function encodeWebSocketFrame(payload) {
+  let header;
+  const len = payload.length;
+
+  if (len < 126) {
+    header = Buffer.alloc(2);
+    header[0] = 0x81; // FIN + Text frame
+    header[1] = len;
+  } else if (len < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x81;
+    header[1] = 126;
+    header.writeUInt16BE(len, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x81;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(len), 2);
+  }
+
+  return Buffer.concat([header, payload]);
+}
+
+/**
+ * 単一ファイルを再コンパイルして HMR で配信
+ *
+ * @param {string} filePath - 変更されたファイルパス
+ * @param {string} srcDir - ソースディレクトリ
+ * @param {string} outDir - 出力ディレクトリ
+ * @param {Set<Socket>} wsClients - WebSocket クライアントセット
+ * @returns {void}
+ */
+function recompileFile(filePath, srcDir, outDir, wsClients) {
+  const config = loadConfig();
+  const fileName = path.basename(filePath);
+
+  // ファイルが存在するかチェック
+  if (!fs.existsSync(filePath)) {
+    console.log(`  ${c.warn('⚠')} File deleted, falling back to full rebuild`);
+    buildAll(srcDir, outDir);
+    broadcastReload(wsClients);
+    return;
+  }
+
+  // ファイルをコンパイル
+  const source = fs.readFileSync(filePath, 'utf-8');
+  const result = compile(source, fileName);
+
+  if (!result.success) {
+    // コンパイルエラー時はフルリロード
+    console.log(`  ${c.err('✗')} Compilation failed, requesting full reload`);
+    for (const d of result.diagnostics) {
+      const icon = d.level === 'error' ? c.err('✗') : c.warn('⚠');
+      console.log(`    ${icon} ${d.message}`);
+    }
+    broadcastReload(wsClients);
+    return;
+  }
+
+  // メタデータからコンポーネント名を抽出
+  let componentName = null;
+  const metaMatch = source.match(/<meta>([\s\S]*?)<\/meta>/);
+  if (metaMatch) {
+    const metaContent = metaMatch[1];
+    const nameMatch = metaContent.match(/name:\s*"([^"]+)"/);
+    if (nameMatch) {
+      componentName = nameMatch[1];
+    }
+  }
+
+  if (!componentName) {
+    console.log(`  ${c.warn('⚠')} Could not determine component name, falling back to full rebuild`);
+    buildAll(srcDir, outDir);
+    broadcastReload(wsClients);
+    return;
+  }
+
+  // 個別ファイルを components/ に出力
+  const componentsDir = path.join(outDir, 'components');
+  fs.mkdirSync(componentsDir, { recursive: true });
+  const outName = fileName.replace('.flare', '.js');
+  const outPath = path.join(componentsDir, outName);
+  fs.writeFileSync(outPath, result.output);
+
+  // ソースマップも出力
+  if (result.sourceMap) {
+    const mapPath = path.join(componentsDir, outName + '.map');
+    fs.writeFileSync(mapPath, JSON.stringify(result.sourceMap, null, 2));
+  }
+
+  // バンドルも更新（他のコンポーネントが参照する可能性）
+  updateBundle(srcDir, outDir);
+
+  const size = (Buffer.byteLength(result.output) / 1024).toFixed(1);
+  console.log(`  ${c.ok('✓')} → components/${outName} (${size} KB)`);
+
+  // HMR で更新を送信
+  broadcastHMRUpdate(wsClients, componentName, result.output);
+  console.log(`  ${c.ok('✓')} Sent HMR update for ${c.b(componentName)}`);
+}
+
+/**
+ * バンドルファイルを更新（全コンポーネントを再集約）
+ *
+ * @param {string} srcDir - ソースディレクトリ
+ * @param {string} outDir - 出力ディレクトリ
+ * @returns {void}
+ */
+function updateBundle(srcDir, outDir) {
+  const config = loadConfig();
+  const bundleName = config.bundle || 'flare-bundle.js';
+  const componentsDir = path.join(outDir, 'components');
+
+  // components/ から全 .js ファイルを読み込み
+  const bundleParts = [];
+  if (fs.existsSync(componentsDir)) {
+    const files = fs.readdirSync(componentsDir).filter(f => f.endsWith('.js') && !f.endsWith('.map'));
+    for (const file of files) {
+      const code = fs.readFileSync(path.join(componentsDir, file), 'utf-8');
+      bundleParts.push(`// ── ${file} ──\n${code}`);
+    }
+  }
+
+  // バンドルを生成
+  if (bundleParts.length > 0) {
+    const bundleHeader = `// Flare Bundle - ${new Date().toISOString()}\n// ${bundleParts.length} component(s)\n\n`;
+    const deferred = `const __flareDefineQueue = [];\n\n`;
+    const bundleFooter = `\n__flareDefineQueue.forEach(([tag, cls]) => {\n  if (!customElements.get(tag)) customElements.define(tag, cls);\n});\n`;
+    const bundleContent = bundleHeader + deferred + bundleParts.join('\n') + bundleFooter;
+    fs.writeFileSync(path.join(outDir, bundleName), bundleContent);
+  }
 }
 
 // ─── Build helper ───
@@ -790,7 +1196,7 @@ function loadConfig() {
     // P2-39: Log warning when JSON parse fails instead of silently returning {}
     // JSON パース失敗時に警告メッセージを出力
     catch (e) {
-      console.warn(c.warn(`⚠ Warning: flare.config.json のパース失敗: ${e.message}`));
+      console.warn(c.warn(msg('CLI_CONFIG_PARSE_ERROR', {error: e.message})));
       return {};
     }
   }
@@ -920,7 +1326,7 @@ ${c.b('Flare')} v${VERSION} - Web Component コンパイラ
 
 ${c.b('Usage:')}
   flare init <name>        新規プロジェクト作成
-  flare dev                開発サーバー起動 (HMR)
+  flare dev                開発サーバー起動 (HMR有効)
   flare build              本番ビルド
   flare check              型チェックのみ
 
@@ -928,7 +1334,14 @@ ${c.b('Options:')}
   --target js|ts           出力フォーマット (default: js)
   --outdir <dir>           出力先ディレクトリ (default: dist)
   --port <number>          dev server ポート (default: 3000)
+  --optimize true|false    バンドルサイズ最適化 (デッドコード削除)
+  --no-hmr                 HMR を無効化し、フルページリロードを使用
   -v, --version            バージョン表示
   -h, --help               ヘルプ表示
+
+${c.b('HMR (ホットモジュールリプレースメント):')}
+  dev コマンド実行時にデフォルトで有効。.flare ファイル変更時に
+  変更されたコンポーネントのみを更新し、ページのリロードなしで
+  ブラウザに反映されます。--no-hmr で従来のフルリロードに戻します。
 `);
 }

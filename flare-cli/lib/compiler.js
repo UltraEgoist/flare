@@ -26,6 +26,12 @@
  */
 
 // ============================================================
+// I18n Support
+// ============================================================
+
+const { msg } = require('./messages');
+
+// ============================================================
 // PHASE 1: Block Splitter
 // ============================================================
 
@@ -1054,9 +1060,9 @@ class TypeChecker {
       case'state':this.symbols.set(d.name,{type:d.type,source:'state'});break;case'prop':this.symbols.set(d.name,{type:d.type,source:'prop'});break;case'computed':this.symbols.set(d.name,{type:d.type,source:'computed'});break;case'fn':this.symbols.set(d.name,{type:d.returnType||{kind:'primitive',name:'void'},source:'fn'});break;case'emit':this.symbols.set(d.name,{type:d.type,source:'emit'});break;case'ref':this.symbols.set(d.name,{type:d.type,source:'ref'});break;case'provide':this.symbols.set(d.name,{type:d.type,source:'provide'});break;case'consume':this.symbols.set(d.name,{type:d.type,source:'consume'});break;case'type':this.typeAliases.set(d.name,d.type);break;}}}
   checkScript(){
     for(const d of this.c.script){
-      if(d.kind==='state'){const t=this.infer(d.init);if(t&&!this.assignable(t,d.type))this.diags.push({level:'error',code:'E0201',message:`state '${d.name}' の初期値の型が一致しません`,span:d.span});}
+      if(d.kind==='state'){const t=this.infer(d.init);if(t&&!this.assignable(t,d.type))this.diags.push({level:'error',code:'E0201',message:msg('E0201',{id:d.name}),span:d.span});}
       // P1-15: Check prop default values against declared type
-      if(d.kind==='prop'&&d.default){const t=this.infer(d.default);if(t&&!this.assignable(t,d.type))this.diags.push({level:'error',code:'E0202',message:`prop '${d.name}' のデフォルト値の型が一致しません`,span:d.span});}
+      if(d.kind==='prop'&&d.default){const t=this.infer(d.default);if(t&&!this.assignable(t,d.type))this.diags.push({level:'error',code:'E0202',message:msg('E0202',{id:d.name}),span:d.span});}
     }
     // P1-16: Detect computed referencing another computed declared after it
     const computedMap=new Map();this.c.script.forEach(d=>{if(d.kind==='computed')computedMap.set(d.name,d);});
@@ -1066,7 +1072,7 @@ class TypeChecker {
         for(const id of ids){
           const ref=computedMap.get(id);
           if(ref&&ref.span.line>d.span.line){
-            this.diags.push({level:'warning',code:'W0204',message:`computed '${d.name}' は後で宣言された '${id}' を参照しています`,span:d.span});
+            this.diags.push({level:'warning',code:'W0204',message:msg('W0204',{id:d.name,dep:id}),span:d.span});
           }
         }
       }
@@ -1076,7 +1082,7 @@ class TypeChecker {
       if(d.kind==='watch'){
         for(const dep of d.deps){
           if(dep.includes('.')){
-            this.diags.push({level:'warning',code:'W0301',message:`watch dep '${dep}' がネストされたパス（obj.field）を含んでいます。生成されたコードが無効になります。トップレベルの state のみを使用してください`,span:d.span});
+            this.diags.push({level:'warning',code:'W0301',message:msg('W0301',{dep:dep}),span:d.span});
           }
         }
       }
@@ -1087,11 +1093,11 @@ class TypeChecker {
     // S-17: Validate event handler expressions to prevent code injection
     if(a.event)this.validateEventHandlerAttr(a);
     // Security: warn about @html usage
-    if(a.html)this.diags.push({level:'warning',code:'W0201',message:`@html はエスケープされません。XSSリスクがあるため、信頼できるデータのみ使用してください`});
+    if(a.html)this.diags.push({level:'warning',code:'W0201',message:msg('W0201')});
     // Security: warn about dynamic href/src (potential javascript: URL injection)
-    if(a.dynamic&&(a.name==='href'||a.name==='src'))this.diags.push({level:'warning',code:'W0202',message:`動的な :${a.name} は javascript: URL インジェクションのリスクがあります。入力を検証してください`});
+    if(a.dynamic&&(a.name==='href'||a.name==='src'))this.diags.push({level:'warning',code:'W0202',message:msg('W0202',{attr:a.name})});
     // P1-24: Warn about static id attributes (cause duplication on re-render)
-    if(a.name==='id'&&!a.dynamic)this.diags.push({level:'warning',code:'W0203',message:`静的な id 属性は再レンダリング時に複製されます。:key を使用するか、ループ外に移動してください`});
+    if(a.name==='id'&&!a.dynamic)this.diags.push({level:'warning',code:'W0203',message:msg('W0203')});
   });this.checkTemplate(n.children);}else if(n.kind==='if'){this.checkVars(n.condition);this.checkTemplate(n.children);if(n.elseIfChain)for(const branch of n.elseIfChain){this.checkVars(branch.condition);this.checkTemplate(branch.children);}if(n.elseChildren)this.checkTemplate(n.elseChildren);}else if(n.kind==='for'){
       // P2-33: Add loop vars to symbols BEFORE checking 'of' expression to avoid false positives
       this.symbols.set(n.each,{type:{kind:'primitive',name:'string'},source:'loop'});
@@ -1100,61 +1106,61 @@ class TypeChecker {
       this.checkTemplate(n.children);if(n.emptyChildren)this.checkTemplate(n.emptyChildren);
       this.symbols.delete(n.each);if(n.index)this.symbols.delete(n.index);
     }}}
-  checkInterp(n){const m=n.expr.match(/^(\w+)\.(\w+)\(/);if(m){const sym=this.symbols.get(m[1]);if(sym&&sym.type.kind==='primitive'){const strM=['toUpperCase','toLowerCase','trim','split','replace','includes','startsWith','endsWith','indexOf','slice'];if(sym.type.name==='number'&&strM.includes(m[2]))this.diags.push({level:'error',code:'E0302',message:`'${m[1]}' は 'number' 型ですが、'${m[2]}' メソッドはありません`,hint:`String(${m[1]}) に変換してください`});}}this.checkVars(n.expr);}
+  checkInterp(n){const m=n.expr.match(/^(\w+)\.(\w+)\(/);if(m){const sym=this.symbols.get(m[1]);if(sym&&sym.type.kind==='primitive'){const strM=['toUpperCase','toLowerCase','trim','split','replace','includes','startsWith','endsWith','indexOf','slice'];if(sym.type.name==='number'&&strM.includes(m[2]))this.diags.push({level:'error',code:'E0302',message:msg('E0302',{id:m[1],type:'number',method:m[2]}),hint:`String(${m[1]}) に変換してください`});}}this.checkVars(n.expr);}
   checkVars(expr){const reserved=new Set(['true','false','null','undefined','void','typeof','instanceof','new','return','if','else','for','while','const','let','var','function','class','this','super','import','export','from','await','async','try','catch','finally','throw','length','map','filter','reduce','push','pop','trim','includes','indexOf','slice','splice','concat','join','split','toFixed','toString','toUpperCase','toLowerCase','replace','match','startsWith','endsWith','parseInt','parseFloat','String','Number','Boolean','Array','Object','Math','JSON','console','window','document','fetch','Promise','Date','Error','event','e','r','s','i','t','n','ok','data','error','index']);
     // Strip string literals before extracting identifiers
     const stripped=expr.replace(/"(?:[^"\\]|\\.)*"/g,' ').replace(/'(?:[^'\\]|\\.)*'/g,' ').replace(/`(?:[^`\\]|\\.)*`/g,' ');
-    const ids=stripped.match(/\b[a-zA-Z_]\w*\b/g)||[];for(const id of ids){if(reserved.has(id)||this.typeAliases.has(id))continue;if(!this.symbols.has(id)){const sug=this.similar(id);this.diags.push({level:'error',code:'E0301',message:`未定義の識別子 '${id}'`,hint:sug?`'${sug}' のことですか？`:undefined});}}}
+    const ids=stripped.match(/\b[a-zA-Z_]\w*\b/g)||[];for(const id of ids){if(reserved.has(id)||this.typeAliases.has(id))continue;if(!this.symbols.has(id)){const sug=this.similar(id);this.diags.push({level:'error',code:'E0301',message:msg('E0301',{id:id}),hint:sug?`'${sug}' のことですか？`:undefined});}}}
   // S-17: Validate event handler attributes for code injection attacks
   validateEventHandlerAttr(attr) {
     const expr = attr.value.trim();
     // Reject empty
     if (!expr) {
-      this.diags.push({level:'error',code:'E0401',message:`Event handler cannot be empty`});
+      this.diags.push({level:'error',code:'E0401',message:msg('E0401_EMPTY')});
       return;
     }
     // Reject keywords that indicate code execution
     const dangerousKeywords = ['eval', 'Function(', 'constructor', '__proto__', 'prototype'];
     for (const keyword of dangerousKeywords) {
       if (expr.toLowerCase().includes(keyword.toLowerCase())) {
-        this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain "${keyword}"`});
+        this.diags.push({level:'error',code:'E0401',message:msg('E0401_KEYWORD',{keyword:keyword})});
         return;
       }
     }
     // Reject multiple statements (semicolon)
     if (expr.includes(';')) {
-      this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain multiple statements (semicolon)`});
+      this.diags.push({level:'error',code:'E0401',message:msg('E0401_SEMICOLON')});
       return;
     }
     // Reject string literals - these can hide malicious code
     if (/['"`]/.test(expr)) {
-      this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain string literals`});
+      this.diags.push({level:'error',code:'E0401',message:msg('E0401_STRING')});
       return;
     }
     // Reject template literals (backticks)
     if (expr.includes('`')) {
-      this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain template literals`});
+      this.diags.push({level:'error',code:'E0401',message:msg('E0401_TEMPLATE_LIT')});
       return;
     }
     // Reject comments
     if (expr.includes('//') || expr.includes('/*')) {
-      this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain comments`});
+      this.diags.push({level:'error',code:'E0401',message:msg('E0401_COMMENT')});
       return;
     }
     // Reject destructuring or spread
     if (expr.includes('...') || expr.includes('[') || expr.includes(']')) {
-      this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain destructuring or spread operators`});
+      this.diags.push({level:'error',code:'E0401',message:msg('E0401_DESTRUCTURE')});
       return;
     }
     // Reject regex literals
     if (/\/.*\/[gimsuvy]*/.test(expr)) {
-      this.diags.push({level:'error',code:'E0401',message:`Invalid event handler: cannot contain regex literals`});
+      this.diags.push({level:'error',code:'E0401',message:msg('E0401_REGEX')});
       return;
     }
     // At this point, we allow simple identifiers, function calls, and assignments
     // No further validation needed - this will be caught at code generation if invalid
   }
-  checkUnused(){const used=new Set();this.collectRefs(this.c.template,used);for(const d of this.c.script){if(d.kind==='computed')(d.expr.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='fn')(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='watch'){d.deps.forEach(dep=>used.add(dep));(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));}}for(const[name,sym]of this.symbols)if(sym.source==='state'&&!used.has(name))this.diags.push({level:'warning',code:'W0101',message:`state '${name}' が宣言されましたが使用されていません`});}
+  checkUnused(){const used=new Set();this.collectRefs(this.c.template,used);for(const d of this.c.script){if(d.kind==='computed')(d.expr.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='fn')(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='watch'){d.deps.forEach(dep=>used.add(dep));(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));}}for(const[name,sym]of this.symbols)if(sym.source==='state'&&!used.has(name))this.diags.push({level:'warning',code:'W0101',message:msg('W0101',{id:name})});}
   collectRefs(nodes,refs){for(const n of nodes){if(n.kind==='interpolation')(n.expr.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));else if(n.kind==='element'){n.attrs.forEach(a=>{if(a.dynamic||a.event||a.bind)(a.value.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));});this.collectRefs(n.children,refs);}else if(n.kind==='if'){(n.condition.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.elseIfChain)for(const branch of n.elseIfChain){(branch.condition.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(branch.children,refs);}if(n.elseChildren)this.collectRefs(n.elseChildren,refs);}else if(n.kind==='for'){(n.of.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.emptyChildren)this.collectRefs(n.emptyChildren,refs);}}}
   infer(e){e=e.trim();if(/^-?\d+(\.\d+)?$/.test(e))return{kind:'primitive',name:'number'};if(/^["'`]/.test(e))return{kind:'primitive',name:'string'};if(e==='true'||e==='false')return{kind:'primitive',name:'boolean'};if(e==='null')return{kind:'primitive',name:'null'};if(e.startsWith('['))return{kind:'array',element:{kind:'primitive',name:'string'}};const sym=this.symbols.get(e);return sym?sym.type:null;}
   assignable(from,to){
@@ -1326,6 +1332,10 @@ function generateDts(c) {
  */
 function generate(c, options) {
   const ts = options?.target === 'ts';  // Generate TypeScript annotations?
+  const optimize = options?.optimize === true;  // Enable helper method tree-shaking?
+
+  // Track which helper methods are actually used
+  const usedHelpers = new Set();
 
   // Collect all declaration names by type for later replacement
   const sv=[],    // state variable names
@@ -1715,6 +1725,7 @@ function generate(c, options) {
           break;
         case'interpolation':
           // Interpolations are always escaped to prevent XSS
+          if(optimize)usedHelpers.add('esc');
           o+=`${pad}\${this.#esc(${loopCtx?txLoop(n.expr,loopCtx):tx(n.expr)})}\n`;
           break;
         case'element':
@@ -1828,6 +1839,7 @@ function generate(c, options) {
       if(a.ref){as+=` data-ref="${a.value}"`;continue;}
       if(a.bind){
         const txExpr = loopCtx ? txLoop(a.value, loopCtx) : tx(a.value);
+        if(optimize)usedHelpers.add('escAttr');
         as+=` value="\${this.#escAttr(${txExpr})}"`;
         continue;
       }
@@ -1838,11 +1850,12 @@ function generate(c, options) {
         // Security: block dangerous on* event handler attributes (e.g., :onclick, :onmouseover)
         if(/^on[a-z]/i.test(a.name)) continue;
         const txExpr = loopCtx ? txLoop(a.value, loopCtx) : tx(a.value);
-        if(a.name==='class')as+=` class="\${this.#escAttr(Object.entries(${txExpr}).filter(([,v])=>v).map(([k])=>k).join(' '))}"`;
-        else if(['disabled','checked','hidden'].includes(a.name))as+=` \${${txExpr} ? '${a.name}' : ''}`;
+        if(a.name==='class'){if(optimize)usedHelpers.add('escAttr');as+=` class="\${this.#escAttr(Object.entries(${txExpr}).filter(([,v])=>v).map(([k])=>k).join(' '))}"`;
+        }else if(['disabled','checked','hidden'].includes(a.name))as+=` \${${txExpr} ? '${a.name}' : ''}`;
         // Security: sanitize href/src to block javascript: and data: URLs
-        else if(['href','src','action','formaction'].includes(a.name))as+=` ${a.name}="\${this.#escUrl(${txExpr})}"`;
-        else as+=` ${a.name}="\${this.#escAttr(${txExpr})}"`;
+        else if(['href','src','action','formaction'].includes(a.name)){if(optimize)usedHelpers.add('escUrl');as+=` ${a.name}="\${this.#escUrl(${txExpr})}"`;
+        }else{if(optimize)usedHelpers.add('escAttr');as+=` ${a.name}="\${this.#escAttr(${txExpr})}"`;
+        }
       } else {
         as+=a.value?` ${a.name}="${a.value}"`:` ${a.name}`;
       }
@@ -2263,7 +2276,7 @@ function generate(c, options) {
   o+=`  }\n\n`;
 
   // #update - diff-based re-render (preserves DOM state)
-  o+=`  #update() {\n`;
+  if(optimize){usedHelpers.add('patch');usedHelpers.add('getNewTree');}o+=`  #update() {\n`;
   o+=`    this.#listeners.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));\n`;
   o+=`    this.#listeners = [];\n`;
   // S-09: Sanitize watch dep names for valid JS identifiers (e.g., "obj.x" → "obj_x")
@@ -2298,32 +2311,38 @@ function generate(c, options) {
   o+=`  }\n\n`;
 
   // #esc - HTML text content escaping (prevents XSS in {{ }} interpolation)
-  o+=`  #esc(val) {\n`;
-  o+=`    if (val == null) return '';\n`;
-  o+=`    const s = String(val);\n`;
-  o+=`    if (!/[&<>"']/.test(s)) return s;\n`;
-  o+=`    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');\n`;
-  o+=`  }\n\n`;
+  if (!optimize || usedHelpers.has('esc')) {
+    o+=`  #esc(val) {\n`;
+    o+=`    if (val == null) return '';\n`;
+    o+=`    const s = String(val);\n`;
+    o+=`    if (!/[&<>"']/.test(s)) return s;\n`;
+    o+=`    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');\n`;
+    o+=`  }\n\n`;
+  }
 
   // #escAttr - Attribute value escaping (prevents attribute injection)
-  o+=`  #escAttr(val) {\n`;
-  o+=`    if (val == null) return '';\n`;
-  o+=`    const s = String(val);\n`;
-  o+=`    if (!/[&<>"'`+'`\\n\\r]/.test(s)) return s;\n';
-  o+=`    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\`/g,'&#96;').replace(/\\n/g,'&#10;').replace(/\\r/g,'&#13;');\n`;
-  o+=`  }\n\n`;
+  if (!optimize || usedHelpers.has('escAttr')) {
+    o+=`  #escAttr(val) {\n`;
+    o+=`    if (val == null) return '';\n`;
+    o+=`    const s = String(val);\n`;
+    o+=`    if (!/[&<>"'`+'`\\n\\r]/.test(s)) return s;\n';
+    o+=`    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\`/g,'&#96;').replace(/\\n/g,'&#10;').replace(/\\r/g,'&#13;');\n`;
+    o+=`  }\n\n`;
+  }
 
   // #escUrl - URL sanitization (blocks javascript:, data:, vbscript:, blob:, file: URLs)
   // S-04: Decode URL-encoded characters before protocol check to prevent bypass (e.g., java%73cript:)
-  o+=`  #escUrl(val) {\n`;
-  o+=`    if (val == null) return '';\n`;
-  o+=`    const s = String(val).trim();\n`;
-  o+=`    let decoded = s;\n`;
-  o+=`    try { decoded = decodeURIComponent(s); } catch(e) {}\n`;
-  o+=`    const normalized = decoded.replace(/[\\s\\x00-\\x1F]/g, '');\n`;
-  o+=`    if (/(javascript|data|vbscript|blob|file)\\s*:/i.test(normalized)) return 'about:blank';\n`;
-  o+=`    return this.#escAttr(s);\n`;
-  o+=`  }\n`;
+  if (!optimize || usedHelpers.has('escUrl')) {
+    o+=`  #escUrl(val) {\n`;
+    o+=`    if (val == null) return '';\n`;
+    o+=`    const s = String(val).trim();\n`;
+    o+=`    let decoded = s;\n`;
+    o+=`    try { decoded = decodeURIComponent(s); } catch(e) {}\n`;
+    o+=`    const normalized = decoded.replace(/[\\s\\x00-\\x1F]/g, '');\n`;
+    o+=`    if (/(javascript|data|vbscript|blob|file)\\s*:/i.test(normalized)) return 'about:blank';\n`;
+    o+=`    return this.#escAttr(s);\n`;
+    o+=`  }\n`;
+  }
 
   o+=`}\n\n`;
   // Deferred registration: if __flareDefineQueue exists (bundle mode), push to queue.
@@ -2342,7 +2361,7 @@ function generate(c, options) {
   // Close IIFE
   o += `\n})();\n`;
 
-  return o;
+  return { output: o, usedHelpers };
 }
 
 // ============================================================
@@ -2361,13 +2380,14 @@ function generate(c, options) {
  *
  * @param {string} source - Raw .flare file content
  * @param {string} fileName - Source file name (for default component name)
- * @param {Object} [options] - Compiler options {target: 'ts'|'js'}
+ * @param {Object} [options] - Compiler options {target: 'ts'|'js', optimize: boolean}
  * @returns {Object} Compilation result:
  *   - success: boolean
  *   - output: Generated JavaScript code (if successful)
  *   - dtsOutput: Generated TypeScript .d.ts (if target='ts')
  *   - diagnostics: Array of error/warning diagnostics
  *   - ast: Component AST (useful for analysis)
+ *   - usedHelpers: Set of helper methods actually used (if optimize=true)
  *
  * @example
  * const result = compile(sourceCode, 'my-button.flare', {target: 'ts'});
@@ -2390,8 +2410,8 @@ function compile(source, fileName, options) {
       success:false,
       diagnostics:[{
         level:'error',
-        code:'E0002',
-        message:'<template> ブロックが見つかりません'
+        code:'E0001',
+        message:msg('E0001')
       }]
     };
 
@@ -2421,7 +2441,7 @@ function compile(source, fileName, options) {
       diagnostics: [{
         level: 'error',
         code: 'E0003',
-        message: `無効なコンポーネント名 '${meta.name}': 小文字英数字とハイフンのみ使用可能で、ハイフンを1つ以上含む必要があります (例: "x-my-component")`
+        message: msg('E0003', { name: meta.name })
       }]
     };
   }
@@ -2434,7 +2454,7 @@ function compile(source, fileName, options) {
   (function collectErrors(nodes) {
     for (const n of nodes) {
       if (n.kind === 'text' && typeof n.value === 'string' && n.value.startsWith('Error: ')) {
-        parseErrors.push({ level: 'error', code: 'E0004', message: `テンプレートパースエラー: ${n.value}` });
+        parseErrors.push({ level: 'error', code: 'E0004', message: msg('E0004', { error: n.value.substring(7) }) });
       }
       if (n.children) collectErrors(n.children);
       if (n.elseChildren) collectErrors(n.elseChildren);
@@ -2463,7 +2483,9 @@ function compile(source, fileName, options) {
   }
 
   // Phase 4: Code generation
-  const output=generate(ast, options);
+  const generateResult=generate(ast, options);
+  const output = typeof generateResult === 'string' ? generateResult : generateResult.output;
+  const usedHelpers = typeof generateResult === 'string' ? null : generateResult.usedHelpers;
 
   // Phase 5: Generate source map
   // Create mappings from generated code back to original .flare file
@@ -2516,7 +2538,8 @@ function compile(source, fileName, options) {
     sourceMap,
     dtsOutput,
     diagnostics,
-    ast
+    ast,
+    usedHelpers: usedHelpers || new Set()
   };
 }
 
