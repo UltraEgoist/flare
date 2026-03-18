@@ -183,9 +183,52 @@ function typeName(t) {
  * この関数は型文字列を内部表現に変換します。
  * 深さ制限により、無限再帰による無限ループを防ぎます。
  */
+/**
+ * Check if position `pos` in string `s` is inside angle brackets <...>.
+ */
+function isInsideAngleBrackets(s, pos) {
+  let depth = 0;
+  for (let i = 0; i < pos; i++) {
+    if (s[i] === '<') depth++;
+    else if (s[i] === '>') depth--;
+  }
+  return depth > 0;
+}
+
+/**
+ * Split a type string by a delimiter at the top level only
+ * (not inside < >, { }, or ( )).
+ *
+ * @param {string} s - Type string
+ * @param {string} delim - Single-character delimiter ('|' or ',')
+ * @returns {string[]}
+ */
+function splitTopLevel(s, delim) {
+  const parts = [];
+  let current = '';
+  let angleDepth = 0, braceDepth = 0, parenDepth = 0;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '<') angleDepth++;
+    else if (ch === '>') angleDepth--;
+    else if (ch === '{') braceDepth++;
+    else if (ch === '}') braceDepth--;
+    else if (ch === '(') parenDepth++;
+    else if (ch === ')') parenDepth--;
+
+    if (ch === delim && angleDepth === 0 && braceDepth === 0 && parenDepth === 0) {
+      parts.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  parts.push(current);
+  return parts;
+}
+
 function parseType(raw, depth = 0) {
   // Safety: prevent stack overflow on malformed types with high nesting
-  // 例: type T = T[][][][] (実際には構文エラー但し無限になるのを防ぐ)
   if (depth > 20) return { kind: 'primitive', name: 'any' };
 
   const s = raw.trim();
@@ -194,13 +237,26 @@ function parseType(raw, depth = 0) {
   if (s.endsWith('[]')) return { kind: 'array', element: parseType(s.slice(0, -2), depth + 1) };
 
   // Handle union types: string | number -> {kind: 'union', types: [...]}
-  if (s.includes('|')) {
-    return { kind: 'union', types: s.split('|').map(p => {
-      const t = p.trim();
-      // Literal type in union: "active" | "inactive"
-      if (t.startsWith('"') || t.startsWith("'")) return { kind: 'literal', value: t.replace(/["']/g, '') };
-      return parseType(t, depth + 1);
-    })};
+  // Must check that '|' is not inside angle brackets (generic params)
+  if (s.includes('|') && !isInsideAngleBrackets(s, s.indexOf('|'))) {
+    // Split on '|' only at top level (not inside < >)
+    const parts = splitTopLevel(s, '|');
+    if (parts.length > 1) {
+      return { kind: 'union', types: parts.map(p => {
+        const t = p.trim();
+        if (t.startsWith('"') || t.startsWith("'")) return { kind: 'literal', value: t.replace(/["']/g, '') };
+        return parseType(t, depth + 1);
+      })};
+    }
+  }
+
+  // Handle generic types: Array<string>, Map<string, number>, Promise<T>
+  const genericMatch = s.match(/^(\w+)\s*<(.+)>$/);
+  if (genericMatch) {
+    const baseName = genericMatch[1];
+    const typeArgsRaw = genericMatch[2];
+    const typeArgs = splitTopLevel(typeArgsRaw, ',').map(a => parseType(a.trim(), depth + 1));
+    return { kind: 'generic', name: baseName, typeArgs };
   }
 
   // Handle primitive types
@@ -266,6 +322,21 @@ function parseMeta(content) {
       case 'shadow': meta.shadow = val; break;
       case 'form': meta.form = val==='true'; break;
       case 'extends': meta.extends = val; break;
+      case 'generic': {
+        // Parse generic type parameters: T, U extends string, V = number
+        meta.generics = val.split(',').map(g => {
+          const gt = g.trim();
+          // T extends Constraint = Default
+          const gm = gt.match(/^(\w+)(?:\s+extends\s+(.+?))?(?:\s*=\s*(.+))?$/);
+          if (gm) return {
+            name: gm[1],
+            constraint: gm[2] ? parseType(gm[2].trim()) : null,
+            default: gm[3] ? parseType(gm[3].trim()) : null,
+          };
+          return { name: gt, constraint: null, default: null };
+        });
+        break;
+      }
     }
   }
   return meta;
@@ -1110,6 +1181,12 @@ class TypeChecker {
    * so they can be referenced in template expressions.
    */
   buildSymbols(){
+    // Register generic type parameters from meta block
+    if(this.c.meta.generics){
+      for(const g of this.c.meta.generics){
+        this.typeAliases.set(g.name, g.constraint || { kind: 'primitive', name: 'any' });
+      }
+    }
     for(const d of this.c.script){
       switch(d.kind){
         case'import':
@@ -1222,18 +1299,34 @@ class TypeChecker {
   }
   checkUnused(){const used=new Set();this.collectRefs(this.c.template,used);for(const d of this.c.script){if(d.kind==='computed')(d.expr.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='fn')(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));if(d.kind==='watch'){d.deps.forEach(dep=>used.add(dep));(d.body.match(/\b\w+\b/g)||[]).forEach(w=>used.add(w));}}for(const[name,sym]of this.symbols)if(sym.source==='state'&&!used.has(name))this.diags.push({level:'warning',code:'W0101',message:msg('W0101',{id:name})});}
   collectRefs(nodes,refs){for(const n of nodes){if(n.kind==='interpolation')(n.expr.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));else if(n.kind==='element'){n.attrs.forEach(a=>{if(a.dynamic||a.event||a.bind)(a.value.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));});this.collectRefs(n.children,refs);}else if(n.kind==='if'){(n.condition.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.elseIfChain)for(const branch of n.elseIfChain){(branch.condition.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(branch.children,refs);}if(n.elseChildren)this.collectRefs(n.elseChildren,refs);}else if(n.kind==='for'){(n.of.match(/\b\w+\b/g)||[]).forEach(w=>refs.add(w));this.collectRefs(n.children,refs);if(n.emptyChildren)this.collectRefs(n.emptyChildren,refs);}}}
-  infer(e){e=e.trim();if(/^-?\d+(\.\d+)?$/.test(e))return{kind:'primitive',name:'number'};if(/^["'`]/.test(e))return{kind:'primitive',name:'string'};if(e==='true'||e==='false')return{kind:'primitive',name:'boolean'};if(e==='null')return{kind:'primitive',name:'null'};if(e.startsWith('['))return{kind:'array',element:{kind:'primitive',name:'string'}};const sym=this.symbols.get(e);return sym?sym.type:null;}
+  infer(e){e=e.trim();if(/^-?\d+(\.\d+)?$/.test(e))return{kind:'primitive',name:'number'};if(/^["'`]/.test(e))return{kind:'primitive',name:'string'};if(e==='true'||e==='false')return{kind:'primitive',name:'boolean'};if(e==='null')return{kind:'primitive',name:'null'};if(e==='[]')return{kind:'array',element:{kind:'primitive',name:'any'}};if(e.startsWith('['))return{kind:'array',element:{kind:'primitive',name:'string'}};if(e.startsWith('new Map'))return{kind:'generic',name:'Map',typeArgs:[{kind:'primitive',name:'any'},{kind:'primitive',name:'any'}]};if(e.startsWith('new Set'))return{kind:'generic',name:'Set',typeArgs:[{kind:'primitive',name:'any'}]};const sym=this.symbols.get(e);return sym?sym.type:null;}
   assignable(from,to){
+    // 'any' is always assignable
+    if(from.kind==='primitive'&&from.name==='any') return true;
+    if(to.kind==='primitive'&&to.name==='any') return true;
+    // Generic type parameter names are treated as 'any' (type-erasure at runtime)
+    if(to.kind==='primitive'&&this.c.meta.generics&&this.c.meta.generics.some(g=>g.name===to.name)) return true;
+    if(from.kind==='primitive'&&this.c.meta.generics&&this.c.meta.generics.some(g=>g.name===from.name)) return true;
+    // Array<T> is assignable to T[] and vice versa
+    if(from.kind==='array'&&to.kind==='generic'&&to.name==='Array'&&to.typeArgs.length===1) {
+      return this.assignable(from.element, to.typeArgs[0]);
+    }
+    if(from.kind==='generic'&&from.name==='Array'&&from.typeArgs.length===1&&to.kind==='array') {
+      return this.assignable(from.typeArgs[0], to.element);
+    }
     // Same type and kind
     if(from.kind===to.kind) {
       if(from.kind==='primitive') return from.name===to.name;
       if(from.kind==='array') return this.assignable(from.element, to.element);
+      if(from.kind==='generic') {
+        if(from.name!==to.name) return false;
+        if(from.typeArgs.length!==to.typeArgs.length) return false;
+        return from.typeArgs.every((a,i)=>this.assignable(a,to.typeArgs[i]));
+      }
       if(from.kind==='union') {
-        // All types in 'from' must be assignable to 'to'
         return from.types.every(t => this.assignable(t, to));
       }
       if(from.kind==='object') {
-        // Check object field compatibility
         if(!to.fields) return false;
         for(const ff of from.fields) {
           const tf = to.fields.find(f => f.name === ff.name);
@@ -1284,6 +1377,8 @@ function typeToTs(t) {
       return t.types.map(typeToTs).join(' | ');
     case 'literal':
       return `"${t.value}"`;
+    case 'generic':
+      return `${t.name}<${t.typeArgs.map(typeToTs).join(', ')}>`;
     case 'object': {
       const fields = t.fields.map(f => `${f.name}${f.optional ? '?' : ''}: ${typeToTs(f.type)}`);
       return `{ ${fields.join('; ')} }`;
@@ -1315,6 +1410,17 @@ function generateDts(c) {
   const className = c.meta.name.split('-').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('');
   const tagName = c.meta.name;
 
+  // Build generic parameter string
+  const generics = c.meta.generics || [];
+  const genericStr = generics.length > 0
+    ? '<' + generics.map(g => {
+        let s = g.name;
+        if (g.constraint) s += ' extends ' + typeToTs(g.constraint);
+        if (g.default) s += ' = ' + typeToTs(g.default);
+        return s;
+      }).join(', ') + '>'
+    : '';
+
   let dts = `// Auto-generated type declarations for ${tagName}\n\n`;
   dts += `declare global {\n`;
   dts += `  namespace JSX {\n`;
@@ -1327,7 +1433,7 @@ function generateDts(c) {
   // Props interface
   const props = c.script.filter(d => d.kind === 'prop');
   if (props.length > 0) {
-    dts += `export interface ${tagName}Props {\n`;
+    dts += `export interface ${tagName}Props${genericStr} {\n`;
     for (const p of props) {
       dts += `  ${p.name}?: ${typeToTs(p.type)};\n`;
     }
@@ -1337,7 +1443,7 @@ function generateDts(c) {
   // Events interface
   const events = c.script.filter(d => d.kind === 'emit');
   if (events.length > 0) {
-    dts += `export interface ${tagName}Events {\n`;
+    dts += `export interface ${tagName}Events${genericStr} {\n`;
     for (const e of events) {
       dts += `  on${e.name.charAt(0).toUpperCase() + e.name.slice(1)}: (detail: ${typeToTs(e.type)}) => void;\n`;
     }
@@ -1345,7 +1451,7 @@ function generateDts(c) {
   }
 
   // Main element class
-  dts += `export declare class ${className} extends HTMLElement {\n`;
+  dts += `export declare class ${className}${genericStr} extends HTMLElement {\n`;
   for (const p of props) {
     dts += `  ${p.name}: ${typeToTs(p.type)};\n`;
   }

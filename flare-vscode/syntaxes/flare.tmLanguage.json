@@ -22,7 +22,7 @@
       "endCaptures": { "1": {"name":"punctuation.definition.tag.begin.flare"}, "2": {"name":"entity.name.tag.block.flare"}, "3": {"name":"punctuation.definition.tag.end.flare"} },
       "name": "meta.block.meta.flare",
       "patterns": [
-        { "match": "^\\s*(name|shadow|form|extends)\\s*(:)\\s*(.+)$", "captures": { "1": {"name":"variable.other.property.flare"}, "2": {"name":"punctuation.separator.flare"}, "3": {"name":"string.unquoted.flare"} } },
+        { "match": "^\\s*(name|shadow|form|extends|generic)\\s*(:)\\s*(.+)$", "captures": { "1": {"name":"variable.other.property.flare"}, "2": {"name":"punctuation.separator.flare"}, "3": {"name":"string.unquoted.flare"} } },
         { "include": "#comment-top" }
       ]
     },

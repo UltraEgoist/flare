@@ -1,0 +1,27 @@
+{
+  "name": "@aspect/flare-router",
+  "version": "0.1.0",
+  "description": "Client-side router for Flare SPA applications",
+  "main": "index.js",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.mjs"
+  ],
+  "keywords": [
+    "flare",
+    "router",
+    "spa",
+    "web-components",
+    "client-side-routing"
+  ],
+  "peerDependencies": {
+    "@aspect/flare": ">=0.1.0"
+  },
+  "license": "MIT"
+}

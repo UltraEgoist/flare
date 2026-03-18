@@ -3569,3 +3569,142 @@ import lodash from "lodash"
 });
 
 console.log('✓ All const/let and import tests passed');
+
+// ============================================================
+// Generic Type Support Tests
+// ============================================================
+
+test('generic: parseType handles Array<string>', () => {
+  const { compile } = require('../lib/compiler');
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+state items: Array<string> = []
+</script>
+<template><p>{{ items }}</p></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+});
+
+test('generic: parseType handles Map<string, number>', () => {
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+state scores: Map<string, number> = new Map()
+</script>
+<template><p>{{ scores }}</p></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+});
+
+test('generic: parseType handles Promise<string>', () => {
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+state result: Promise<string> = Promise.resolve("")
+</script>
+<template><p>{{ result }}</p></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+});
+
+test('generic: nested generics Array<Map<string, number>>', () => {
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+state data: Array<Map<string, number>> = []
+</script>
+<template><p>{{ data }}</p></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+});
+
+test('generic: meta block generic parameter', () => {
+  const src = `<meta>
+name: x-list
+generic: T
+</meta>
+<script>
+state items: T[] = []
+</script>
+<template><p>{{ items }}</p></template>`;
+  const r = compile(src, 'x-list.flare');
+  assertSuccess(r);
+});
+
+test('generic: meta block generic with constraint', () => {
+  const src = `<meta>
+name: x-list
+generic: T extends string
+</meta>
+<script>
+state value: T = ""
+</script>
+<template><p>{{ value }}</p></template>`;
+  const r = compile(src, 'x-list.flare');
+  assertSuccess(r);
+});
+
+test('generic: multiple generic parameters', () => {
+  const src = `<meta>
+name: x-pair
+generic: K, V
+</meta>
+<script>
+state key: K = null
+state val: V = null
+</script>
+<template><p>{{ key }}: {{ val }}</p></template>`;
+  const r = compile(src, 'x-pair.flare');
+  assertSuccess(r);
+});
+
+test('generic: .d.ts output includes generic params (ts target)', () => {
+  const src = `<meta>
+name: x-box
+generic: T extends string
+</meta>
+<script>
+prop content: T = ""
+</script>
+<template><p>{{ content }}</p></template>`;
+  const r = compile(src, 'x-box.flare', { target: 'ts' });
+  assertSuccess(r);
+  assert.ok(r.dtsOutput, 'should have dtsOutput');
+  assertContains(r.dtsOutput, '<T extends string>');
+  assertContains(r.dtsOutput, 'XBox');
+});
+
+test('generic: typeToTs outputs correct generic string', () => {
+  // Test via the compile output with TS target
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+state items: Array<string> = []
+state map: Map<string, number> = new Map()
+</script>
+<template><p>{{ items }}</p></template>`;
+  const r = compile(src, 'x-test.flare', { target: 'ts' });
+  assertSuccess(r);
+  assertContains(r.output, 'Array<string>');
+  assertContains(r.output, 'Map<string, number>');
+});
+
+test('generic: union with generic does not break', () => {
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+state data: Array<string> | null = null
+</script>
+<template><p>{{ data }}</p></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+});
+
+console.log('✓ All generic type tests passed');

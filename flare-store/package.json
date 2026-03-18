@@ -1,0 +1,24 @@
+{
+  "name": "@aspect/flare-store",
+  "version": "0.1.0",
+  "description": "Reactive global state management for Flare applications",
+  "main": "index.js",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.mjs"
+  ],
+  "keywords": [
+    "flare",
+    "store",
+    "state-management",
+    "reactive",
+    "web-components"
+  ],
+  "license": "MIT"
+}

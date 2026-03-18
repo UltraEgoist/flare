@@ -177,6 +177,7 @@ const HOVER = {
   'name': '**name** — カスタム要素タグ名\n\nハイフンを1つ以上含む必要があります。\n\n```flare\n<meta>\n  name: "x-button"\n</meta>\n```\n\n省略時はファイル名から自動生成されます。',
   'shadow': '**shadow** — Shadow DOMモード\n\n```\nshadow: open     // 外部からアクセス可能（デフォルト）\nshadow: closed   // 外部からアクセス不可\nshadow: none     // Shadow DOM不使用\n```\n\n`none` はTailwind等の外部CSSと併用する場合に便利です。',
   'form': '**form** — フォーム連携\n\nコンポーネントをForm-Associated Custom Elementにします。\n\n```flare\n<meta>\n  name: x-input\n  form: true\n</meta>\n```\n\n有効にすると:\n- `setFormValue(value)` でフォーム値を設定\n- `setValidity(flags, message)` でバリデーション\n- `on formReset { }` 等のフォームライフサイクル使用可\n- `form`, `validity`, `checkValidity()` 等のAPI自動公開',
+  'generic': '**generic** — ジェネリック型パラメータ\n\nコンポーネントに型パラメータを宣言し、再利用可能な型安全コンポーネントを作成。\n\n```flare\n<meta>\n  name: x-list\n  generic: T\n</meta>\n\n<script>\n  state items: T[] = []\n  prop renderer: (item: T) => string = String\n</script>\n```\n\n制約付きパラメータ:\n```flare\ngeneric: T extends string, U = number\n```\n\n`.d.ts` 出力にジェネリックが反映されます。',
 
   // ── Form lifecycle ──
   'formReset': '**on formReset** — フォームリセット\n\nフォームの `reset` 時に呼ばれます。初期値への復元処理を記述。\n\n```flare\non formReset {\n  value = ""\n  setFormValue("")\n}\n```',
@@ -214,7 +215,7 @@ function detectBlock(document, lineNumber) {
 }
 
 // メタブロック専用キーワード — <script>内ではユーザー定義シンボルを優先
-const META_ONLY_HOVER_KEYS = new Set(['name', 'shadow', 'form']);
+const META_ONLY_HOVER_KEYS = new Set(['name', 'shadow', 'form', 'generic']);
 
 /**
  * ホバードキュメントプロバイダー
@@ -476,6 +477,7 @@ const COMPLETIONS = {
   'consume': { kind: vscode.CompletionItemKind.Keyword, detail: 'コンテキスト受信', insertText: 'consume ${1:name}: ${2:type}' },
   'import': { kind: vscode.CompletionItemKind.Keyword, detail: 'インポート', insertText: 'import ${1:name} from "${2:path}"' },
   'type': { kind: vscode.CompletionItemKind.Keyword, detail: '型エイリアス', insertText: 'type ${1:Name} = ${2:type}' },
+  'generic': { kind: vscode.CompletionItemKind.Keyword, detail: 'ジェネリック型パラメータ（meta内）', insertText: 'generic: ${1:T}' },
 
   // Template directives
   '#if': { kind: vscode.CompletionItemKind.Keyword, detail: '条件分岐', insertText: '<#if cond="${1:condition}">\n  ${2:}\n</#if>' },
