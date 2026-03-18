@@ -3058,3 +3058,62 @@ state label: string = "hi"
 });
 
 console.log('✓ All component auto-import tests passed');
+
+// ============================================================
+// EVENT HANDLER RESOLUTION TESTS
+// ============================================================
+console.log('\n── Event Handler Resolution Tests ──');
+
+test('event handler: fn name is called with (e) argument', () => {
+  const src = `<script>
+fn handleClick() { console.log("clicked") }
+</script>
+<template><button @click="handleClick">test</button></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'this.#handleClick\\(e\\)');
+});
+
+test('event handler: state variable as handler calls with typeof check', () => {
+  const src = `<script>
+state handler: object = {}
+</script>
+<template><button @click="handler">test</button></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+  assertContains(r.output, "typeof this.#handler === 'function'");
+});
+
+test('event handler: expressions with (e) work', () => {
+  const src = `<script>
+fn handleInput(e: InputEvent) { console.log(e.target) }
+</script>
+<template><input @input="handleInput(e)" /></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'handleInput');
+});
+
+test('event handler: checkVars validates identifiers in handler expressions', () => {
+  const src = `<script>
+state count: number = 0
+</script>
+<template><button @click="undefinedFn(count)">test</button></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertFail(r);
+  assert.ok(r.diagnostics.some(d => d.code === 'E0301'));
+});
+
+test('single-line fn: two single-line fns are both parsed', () => {
+  const src = `<script>
+fn a() { console.log("a") }
+fn b() { console.log("b") }
+</script>
+<template><button @click="a" @mouseenter="b">test</button></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'this.#a\\(e\\)');
+  assertContains(r.output, 'this.#b\\(e\\)');
+});
+
+console.log('✓ All event handler resolution tests passed');

@@ -494,8 +494,28 @@ function parseScript(content, startLine) {
           if (pm) params.push({ name:pm[1], type:parseType(pm[2]) });
         }
       }
+      // Check if function body is on the same line (single-line fn)
+      const afterBrace = line.substring(m[0].length);
+      const sameLineBraces = countBraces(afterBrace);
+      if (sameLineBraces <= -1) {
+        // Body closes on same line: fn name() { ... }
+        // Extract body between { and last }
+        const bodyMatch = afterBrace.match(/^([\s\S]*)\}\s*$/);
+        const body = bodyMatch ? bodyMatch[1].trim() : afterBrace.trim();
+        decls.push({
+          kind:'fn',
+          name: m[2],
+          async: !!m[1],
+          params: params,
+          returnType: m[4] ? parseType(m[4]) : undefined,
+          body: body,
+          span: {line: ln}
+        });
+        i++; continue;
+      }
       // Multi-line function body: collect lines until braces balance
-      let body='', bc=1;
+      let body = afterBrace.trim() ? afterBrace.trim() + '\n' : '';
+      let bc = 1 + sameLineBraces;  // Account for any braces on the opening line after {
       i++;
       while (i<lines.length && bc>0) {
         const l=lines[i];
@@ -1103,7 +1123,7 @@ class TypeChecker {
   checkTemplate(nodes){for(const n of nodes){if(n.kind==='interpolation')this.checkInterp(n);else if(n.kind==='element'){n.attrs.forEach(a=>{
     if(a.dynamic||a.bind)this.checkVars(a.value);
     // S-17: Validate event handler expressions to prevent code injection
-    if(a.event)this.validateEventHandlerAttr(a);
+    if(a.event){this.validateEventHandlerAttr(a);this.checkVars(a.value);}
     // Security: warn about @html usage
     if(a.html)this.diags.push({level:'warning',code:'W0201',message:msg('W0201')});
     // Security: warn about dynamic href/src (potential javascript: URL injection)
@@ -1978,6 +1998,37 @@ function generate(c, options) {
    * - ループ内でも動的 ID でハンドラーを正しく結び付ける
    * - アンマウント時にリッスナーを自動的にクリーンアップする
    */
+  /**
+   * Resolve a bare handler identifier to its correct call form.
+   *
+   * fn name -> this.#name(e)    (private method, pass event)
+   * state handler -> this.#handler(e)  (state var holding a function, call with event)
+   * computed handler -> this.#handler(e)
+   * unknown -> this.#name(e)    (fallback, assume method)
+   *
+   * @param {string} name - The bare identifier
+   * @returns {string} Resolved call expression
+   */
+  function resolveHandler(name) {
+    if (fn.includes(name)) {
+      // fn declaration → private method call, pass event arg
+      return `this.#${name}(e)`;
+    }
+    if (sv.includes(name)) {
+      // state variable holding a function → call the value
+      return `(typeof this.#${name} === 'function' ? this.#${name}(e) : this.#${name})`;
+    }
+    if (pv.includes(name)) {
+      // prop (could be a callback from parent)
+      return `(typeof this.#prop_${name} === 'function' ? this.#prop_${name}(e) : this.#prop_${name})`;
+    }
+    if (cv.includes(name)) {
+      return `(typeof this.#${name} === 'function' ? this.#${name}(e) : this.#${name})`;
+    }
+    // Fallback: assume it's a method
+    return `this.#${name}(e)`;
+  }
+
   function buildEvtCode(root) {
     let code = '';
     for (const binding of eventBindings) {
@@ -2009,7 +2060,8 @@ function generate(c, options) {
           } else if(handlerBody.includes('(')){
             h=`(e) => { ${pre}${txLoopHandler(handlerBody, lc)}; this.#update(); }`;
           } else {
-            h=`(e) => { ${pre}this.#${handlerBody}(); this.#update(); }`;
+            // Bare identifier: resolve using symbol table
+            h=`(e) => { ${pre}${resolveHandler(handlerBody)}; this.#update(); }`;
           }
           // P1-17: Use counter suffix for duplicate event handlers
           const count = eventCounters[a.name] ?? 0;
@@ -2052,7 +2104,8 @@ function generate(c, options) {
           } else if(a.value.includes('(')){
             h=`(e) => { ${pre}${tx(a.value)}; this.#update(); }`;
           } else {
-            h=`(e) => { ${pre}this.#${a.value}(); this.#update(); }`;
+            // Bare identifier: resolve using symbol table
+            h=`(e) => { ${pre}${resolveHandler(a.value)}; this.#update(); }`;
           }
           // P1-17: Use counter suffix for duplicate event handlers
           const count = eventCounters[a.name] ?? 0;

@@ -16,8 +16,8 @@
       "name": "comment.line.double-slash.flare"
     },
     "meta-block": {
-      "begin": "(<)(meta)(>)",
-      "beginCaptures": { "1": {"name":"punctuation.definition.tag.begin.flare"}, "2": {"name":"entity.name.tag.block.flare"}, "3": {"name":"punctuation.definition.tag.end.flare"} },
+      "begin": "(<)(meta)(\\s[^>]*)?(>)",
+      "beginCaptures": { "1": {"name":"punctuation.definition.tag.begin.flare"}, "2": {"name":"entity.name.tag.block.flare"}, "3": {"name":"entity.other.attribute-name.flare"}, "4": {"name":"punctuation.definition.tag.end.flare"} },
       "end": "(</)(meta)(>)",
       "endCaptures": { "1": {"name":"punctuation.definition.tag.begin.flare"}, "2": {"name":"entity.name.tag.block.flare"}, "3": {"name":"punctuation.definition.tag.end.flare"} },
       "name": "meta.block.meta.flare",
@@ -27,8 +27,19 @@
       ]
     },
     "script-block": {
-      "begin": "(<)(script)(>)",
-      "beginCaptures": { "1": {"name":"punctuation.definition.tag.begin.flare"}, "2": {"name":"entity.name.tag.block.flare"}, "3": {"name":"punctuation.definition.tag.end.flare"} },
+      "begin": "(<)(script)((?:\\s+[^>]*)?)(>)",
+      "beginCaptures": {
+        "1": {"name":"punctuation.definition.tag.begin.flare"},
+        "2": {"name":"entity.name.tag.block.flare"},
+        "3": {"patterns": [
+          { "match": "(type)(=)(\"[^\"]*\"|'[^']*')", "captures": {
+            "1": {"name":"entity.other.attribute-name.flare"},
+            "2": {"name":"punctuation.separator.key-value.flare"},
+            "3": {"name":"string.quoted.flare"}
+          }}
+        ]},
+        "4": {"name":"punctuation.definition.tag.end.flare"}
+      },
       "end": "(</)(script)(>)",
       "endCaptures": { "1": {"name":"punctuation.definition.tag.begin.flare"}, "2": {"name":"entity.name.tag.block.flare"}, "3": {"name":"punctuation.definition.tag.end.flare"} },
       "name": "meta.block.script.flare",
@@ -39,7 +50,9 @@
       "patterns": [
         { "include": "#comment-top" },
         { "begin": "/\\*\\*", "end": "\\*/", "name": "comment.block.documentation.flare", "patterns": [
-          { "match": "@(param|returns|type|example|see|deprecated|since|todo)\\b", "name": "keyword.other.jsdoc.flare" }
+          { "match": "@(param|returns|return|type|typedef|example|see|deprecated|since|todo|throws|description|property|template|author|version|link|enum|callback|fires|emits|private|protected|public|abstract|override|readonly|implements|extends|mixin)\\b", "name": "keyword.other.jsdoc.flare" },
+          { "match": "\\{[^}]+\\}", "name": "entity.name.type.jsdoc.flare" },
+          { "match": "\\b[A-Z]\\w+\\b", "name": "entity.name.type.jsdoc.flare" }
         ] },
         { "begin": "/\\*", "end": "\\*/", "name": "comment.block.flare" },
         { "match": "\\b(emit)(?:\\s*\\(([^)]*)\\))?\\s+(\\w+)", "captures": { "1": {"name":"keyword.declaration.flare"}, "2": {"name":"entity.other.attribute-name.modifier.flare"}, "3": {"name":"variable.other.event.flare"} } },
@@ -49,6 +62,7 @@
         { "match": "\\b(watch|provide|consume)\\b", "name": "keyword.control.flare" },
         { "match": "\\b(on)\\s+(mount|unmount|adopt|update)\\b", "captures": { "1": {"name":"keyword.control.flare"}, "2": {"name":"entity.name.function.lifecycle.flare"} } },
         { "match": "\\b(type)\\s+(\\w+)\\s*=", "captures": { "1": {"name":"keyword.declaration.type.flare"}, "2": {"name":"entity.name.type.flare"} } },
+        { "match": "\\b(import)\\s+(['\"])(.+?)\\2\\s*$", "captures": { "1": {"name":"keyword.control.import.flare"}, "3": {"name":"string.quoted.module.flare"} } },
         { "match": "\\b(import)\\s+(.+?)\\s+(from)\\s+(['\"])(.+?)\\4", "captures": { "1": {"name":"keyword.control.import.flare"}, "2": {"name":"variable.other.readwrite.flare"}, "3": {"name":"keyword.control.from.flare"}, "5": {"name":"string.quoted.module.flare"} } },
         { "match": ":\\s*(string|number|boolean|void|null|undefined|any|never|unknown|object|bigint|symbol)(\\[\\])?\\b", "captures": { "1": {"name":"support.type.primitive.ts"}, "2": {"name":"punctuation.definition.array.ts"} } },
         { "match": ":\\s*(\\w+)(\\[\\])?(?=\\s*[=,;)\\n{|])", "captures": { "1": {"name":"entity.name.type.ts"}, "2": {"name":"punctuation.definition.array.ts"} } },
@@ -165,7 +179,7 @@
     },
     "html-comment": { "begin": "<!--", "end": "-->", "name": "comment.block.html" },
     "style-block": {
-      "begin": "(<)(style)((?:\\s+\\w+)?)(>)",
+      "begin": "(<)(style)((?:\\s+[^>]*)?)(>)",
       "beginCaptures": { "1": {"name":"punctuation.definition.tag.begin.flare"}, "2": {"name":"entity.name.tag.block.flare"}, "3": {"name":"entity.other.attribute-name.flare"}, "4": {"name":"punctuation.definition.tag.end.flare"} },
       "end": "(</)(style)(>)",
       "endCaptures": { "1": {"name":"punctuation.definition.tag.begin.flare"}, "2": {"name":"entity.name.tag.block.flare"}, "3": {"name":"punctuation.definition.tag.end.flare"} },

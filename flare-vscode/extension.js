@@ -142,7 +142,7 @@ const HOVER = {
   'state': '**state** — リアクティブ変数\n\n内部状態を宣言します。値を変更するとテンプレートが自動更新されます。\n\n```flare\nstate count: number = 0\nstate name: string = "hello"\nstate items: string[] = []\n```\n\n型注釈と初期値が必須です。',
   'prop': '**prop** — 外部属性\n\n親から受け取る属性を宣言します。HTML属性として反映・監視されます。\n\n```flare\nprop label: string               // 必須\nprop size: number = 16            // デフォルト付き\nprop disabled: boolean = false\n```\n\n型による反映: `string` → getAttribute, `number` → parseFloat, `boolean` → 属性の有無',
   'computed': '**computed** — 派生値\n\nstate/propから自動計算される読み取り専用の値です。依存値が変わると再計算されます。\n\n```flare\ncomputed total: number = items.reduce((s, i) => s + i.price, 0)\ncomputed isValid: boolean = name.length > 0\n```',
-  'fn': '**fn** — 関数定義\n\nコンポーネントのメソッドを定義します。内部でstateを変更するとDOMが自動更新されます。\n\n```flare\nfn increment() {\n  count += 1\n}\n\nfn greet(name: string): string {\n  return `Hello, ${name}!`\n}\n\nfn async fetchData() {\n  data = await fetch("/api").then(r => r.json())\n}\n```\n\nテンプレートからは `@click="increment"` のように関数名で参照します。\n`fn` はJavaScriptの `function` ではなく、Flareがリアクティビティを追跡する特別な関数です。\nRust風の短いキーワードを採用し、「Flareの関数」であることを明示しています。',
+  'fn': '**fn** — 関数定義\n\nコンポーネントのプライベートメソッドを定義します。\n内部でstateを変更するとDOMが自動更新されます。\n\n```flare\nfn increment() {\n  count += 1\n}\n\nfn greet(name: string): string {\n  return `Hello, ${name}!`\n}\n\nfn async fetchData() {\n  data = await fetch("/api").then(r => r.json())\n}\n```\n\n**コンパイル結果**: `fn` はクラスの **private メソッド** (`#name()`) に変換されます。\n`this` はコンポーネントインスタンスを指します（Arrow関数ではありません）。\n\n**イベントハンドラとして使う場合**:\n- `@click="increment"` → `(e) => { this.#increment(e); this.#update(); }` に展開\n- ハンドラには `e` (イベントオブジェクト) が自動的に第1引数として渡されます\n- `state` 変数に関数を格納して渡すことも可能です',
   'emit': '**emit** — カスタムイベント\n\n親へ通知するイベントを宣言します。CustomEventとしてdispatchされます。\n\n```flare\nemit close: { reason: string }        // デフォルト (bubbles+composed)\nemit(bubbles) notify: void             // バブリングのみ\nemit(composed) select: { id: number }  // Shadow DOM越えのみ\nemit(local) internal: void             // 自身のみ\n```\n\nオプション: `bubbles`, `composed`, `local`\n省略時: `bubbles: true, composed: true`',
   'ref': '**ref** — DOM参照\n\nテンプレート内のDOM要素への直接参照を取得します。\n\n```flare\nref canvas: HTMLCanvasElement\n\non mount {\n  const ctx = canvas.getContext("2d")\n}\n```\n\nテンプレート側: `<canvas ref="canvas" />`',
   'watch': '**watch** — 副作用\n\n値の変更時にDOM以外の副作用を実行します。\n\n```flare\nwatch(count) {\n  localStorage.setItem("count", String(count))\n}\n```',
@@ -252,9 +252,44 @@ function provideHover(document, position) {
     const parts = word.slice(1).split('|');
     const evName = parts[0];
     const mods = parts.slice(1);
-    let md = `**@${evName}** — イベントリスナー\n\n\`${evName}\` イベント発火時にハンドラを実行します。\n\n`;
-    md += '```flare\n<button @' + word.slice(1) + '="handlerFn">...</button>\n```\n\n';
-    md += '値には `fn` で定義した関数名を直接指定します（文字列ではなく関数参照）。\n\n';
+    // Event type mapping for DOM events
+    const eventTypeMap = {
+      'click': 'MouseEvent', 'dblclick': 'MouseEvent', 'mousedown': 'MouseEvent',
+      'mouseup': 'MouseEvent', 'mousemove': 'MouseEvent', 'mouseenter': 'MouseEvent',
+      'mouseleave': 'MouseEvent', 'mouseover': 'MouseEvent', 'mouseout': 'MouseEvent',
+      'contextmenu': 'MouseEvent',
+      'keydown': 'KeyboardEvent', 'keyup': 'KeyboardEvent', 'keypress': 'KeyboardEvent',
+      'input': 'InputEvent', 'change': 'Event', 'focus': 'FocusEvent', 'blur': 'FocusEvent',
+      'focusin': 'FocusEvent', 'focusout': 'FocusEvent',
+      'submit': 'SubmitEvent', 'reset': 'Event',
+      'scroll': 'Event', 'resize': 'UIEvent',
+      'touchstart': 'TouchEvent', 'touchend': 'TouchEvent', 'touchmove': 'TouchEvent',
+      'touchcancel': 'TouchEvent',
+      'drag': 'DragEvent', 'dragstart': 'DragEvent', 'dragend': 'DragEvent',
+      'dragenter': 'DragEvent', 'dragleave': 'DragEvent', 'dragover': 'DragEvent', 'drop': 'DragEvent',
+      'pointerdown': 'PointerEvent', 'pointerup': 'PointerEvent', 'pointermove': 'PointerEvent',
+      'wheel': 'WheelEvent',
+      'animationstart': 'AnimationEvent', 'animationend': 'AnimationEvent',
+      'transitionend': 'TransitionEvent',
+      'load': 'Event', 'error': 'ErrorEvent',
+    };
+    const evType = eventTypeMap[evName] || 'Event';
+    let md = `**@${evName}** — イベントリスナー\n\n`;
+    md += `\`${evName}\` イベント発火時にハンドラを実行します。\n\n`;
+    md += `**イベント型**: \`${evType}\`\n\n`;
+    md += '```flare\n';
+    md += '// fn で定義した関数名を渡す（e は自動的に渡されます）\n';
+    md += `<button @${word.slice(1)}="handleClick">...</button>\n\n`;
+    md += '// 式も記述可能\n';
+    md += `<button @${word.slice(1)}="count += 1">...</button>\n\n`;
+    md += '// e (イベントオブジェクト) を関数に渡す\n';
+    md += `<input @${word.slice(1)}="handleInput(e)">...</input>\n`;
+    md += '```\n\n';
+    md += `ハンドラ内では \`e\` で \`${evType}\` オブジェクトにアクセスできます。\n\n`;
+    md += '**渡せる値**:\n';
+    md += '- `fn` 定義の関数名（`e` が自動的に第1引数として渡される）\n';
+    md += '- `state` 変数（関数を保持している場合、`e` を引数に呼ばれる）\n';
+    md += '- 任意の式（`count += 1`、`doSomething(e)` など）\n\n';
     if (mods.length) {
       const modDoc = {
         'prevent': '`e.preventDefault()` — デフォルト動作を防止',
