@@ -43,7 +43,7 @@
       "end": "(</)(script)(>)",
       "endCaptures": { "1": {"name":"punctuation.definition.tag.begin.flare"}, "2": {"name":"entity.name.tag.block.flare"}, "3": {"name":"punctuation.definition.tag.end.flare"} },
       "name": "meta.block.script.flare",
-      "contentName": "source.ts",
+      "contentName": "source.flare.script",
       "patterns": [ { "include": "#script-content" } ]
     },
     "script-content": {

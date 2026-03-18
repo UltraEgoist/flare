@@ -348,6 +348,7 @@ function provideHover(document, position) {
       // 関数: fn [async] name(params)
       const asyncMark = sym.async ? 'async ' : '';
       md += `\`\`\`flare\nfn ${asyncMark}${word}(${sym.params || ''})\n\`\`\`\n\n`;
+      md += `コンパイル: \`#${word}()\` private メソッド\n\n`;
     } else if (sym.source === 'emit') {
       // イベント: emit [(修飾子)] name: type
       const opts = sym.options ? `(${sym.options}) ` : '';
@@ -355,8 +356,25 @@ function provideHover(document, position) {
     } else if (sym.source === 'computed') {
       // 派生値: computed name: type = expr
       md += `\`\`\`flare\ncomputed ${word}: ${sym.type} = ${sym.expr || '...'}\n\`\`\`\n\n`;
+    } else if (sym.source === 'state') {
+      // 状態変数: state name: type = init
+      // 初期値が長い場合は省略表示
+      const initDisplay = sym.init ? (sym.init.length > 50 ? sym.init.substring(0, 47) + '...' : sym.init) : '';
+      const initStr = initDisplay ? ` = ${initDisplay}` : '';
+      md += `\`\`\`flare\nstate ${word}: ${sym.type}${initStr}\n\`\`\`\n\n`;
+      // 関数型の場合はイベントハンドラとして使える旨を表示
+      if (sym.type.toLowerCase().includes('function') || (sym.init && (sym.init.includes('=>') || sym.init.includes('function')))) {
+        md += `*関数式* — \`@click="${word}"\` でイベントハンドラとして使用可能\n\n`;
+      }
+    } else if (sym.source === 'prop') {
+      const initStr = sym.init ? ` = ${sym.init}` : '';
+      md += `\`\`\`flare\nprop ${word}: ${sym.type}${initStr}\n\`\`\`\n\n`;
+      // コールバック prop の場合
+      if (sym.type.toLowerCase().includes('function') || sym.type.includes('=>')) {
+        md += `*コールバック* — 親から渡された関数。\`@click="${word}"\` で使用可能\n\n`;
+      }
     } else {
-      // その他（state, prop, ref等）: kind name: type [= init]
+      // ref, provide, consume 等
       const initStr = sym.init ? ` = ${sym.init}` : '';
       md += `\`\`\`flare\n${kind} ${word}: ${sym.type}${initStr}\n\`\`\`\n\n`;
     }
