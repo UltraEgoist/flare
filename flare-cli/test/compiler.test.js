@@ -3117,3 +3117,204 @@ fn b() { console.log("b") }
 });
 
 console.log('✓ All event handler resolution tests passed');
+
+// ============================================================
+// Form-Associated Custom Elements
+// ============================================================
+
+test('form: true generates static formAssociated and internals', () => {
+  const src = `<meta>
+name: x-input
+form: true
+</meta>
+<script>
+state val: string = ""
+</script>
+<template><input :value="val" /></template>`;
+  const r = compile(src, 'Input.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'static formAssociated = true');
+  assertContains(r.output, '#internals');
+  assertContains(r.output, 'this.attachInternals()');
+});
+
+test('form: true generates form lifecycle callbacks', () => {
+  const src = `<meta>
+name: x-input
+form: true
+</meta>
+<script>
+state val: string = ""
+</script>
+<template><input :value="val" /></template>`;
+  const r = compile(src, 'Input.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'formAssociatedCallback');
+  assertContains(r.output, 'formDisabledCallback');
+  assertContains(r.output, 'formResetCallback');
+  assertContains(r.output, 'formStateRestoreCallback');
+});
+
+test('form: true generates public form API methods', () => {
+  const src = `<meta>
+name: x-input
+form: true
+</meta>
+<template><input /></template>`;
+  const r = compile(src, 'Input.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'get form()');
+  assertContains(r.output, 'get validity()');
+  assertContains(r.output, 'get validationMessage()');
+  assertContains(r.output, 'get willValidate()');
+  assertContains(r.output, 'checkValidity()');
+  assertContains(r.output, 'reportValidity()');
+});
+
+test('form: true with setFormValue in script', () => {
+  const src = `<meta>
+name: x-input
+form: true
+</meta>
+<script>
+state val: string = ""
+fn handleInput(e: InputEvent) {
+  val = e.target.value
+  setFormValue(val)
+}
+</script>
+<template><input @input="handleInput" /></template>`;
+  const r = compile(src, 'Input.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'this.#setFormValue');
+});
+
+test('form: true with setValidity in script', () => {
+  const src = `<meta>
+name: x-input
+form: true
+</meta>
+<script>
+state val: string = ""
+fn validate() {
+  if (val.length === 0) {
+    setValidity({ valueMissing: true }, "Value is required")
+  } else {
+    setValidity({})
+  }
+}
+</script>
+<template><input :value="val" /></template>`;
+  const r = compile(src, 'Input.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'this.#setValidity');
+});
+
+test('form: true with on formReset lifecycle', () => {
+  const src = `<meta>
+name: x-input
+form: true
+</meta>
+<script>
+state val: string = "default"
+on formReset {
+  val = "default"
+}
+</script>
+<template><input :value="val" /></template>`;
+  const r = compile(src, 'Input.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'formResetCallback');
+  // The body should contain the reset logic
+  const resetIdx = r.output.indexOf('formResetCallback');
+  const resetBody = r.output.substring(resetIdx, resetIdx + 200);
+  assert.ok(resetBody.includes('#val'), 'formReset body should reference state');
+});
+
+test('form: false (default) does not generate form internals', () => {
+  const src = `<meta>
+name: x-normal
+</meta>
+<template><div>hello</div></template>`;
+  const r = compile(src, 'Normal.flare');
+  assertSuccess(r);
+  assert.ok(!r.output.includes('formAssociated'), 'should not have formAssociated');
+  assert.ok(!r.output.includes('#internals'), 'should not have internals');
+  assert.ok(!r.output.includes('attachInternals'), 'should not have attachInternals');
+});
+
+console.log('✓ All form-associated tests passed');
+
+// ============================================================
+// Slot Support
+// ============================================================
+
+test('slot: default slot renders in template', () => {
+  const src = `<meta>
+name: x-card
+</meta>
+<template>
+  <div class="card"><slot></slot></div>
+</template>`;
+  const r = compile(src, 'Card.flare');
+  assertSuccess(r);
+  assertContains(r.output, '<slot>');
+});
+
+test('slot: named slots render correctly', () => {
+  const src = `<meta>
+name: x-layout
+</meta>
+<template>
+  <header><slot name="header"></slot></header>
+  <main><slot></slot></main>
+  <footer><slot name="footer"></slot></footer>
+</template>`;
+  const r = compile(src, 'Layout.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'name="header"');
+  assertContains(r.output, 'name="footer"');
+});
+
+test('slot: fallback content in slot', () => {
+  const src = `<meta>
+name: x-panel
+</meta>
+<template>
+  <div><slot>Default Content</slot></div>
+</template>`;
+  const r = compile(src, 'Panel.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'Default Content');
+});
+
+test('slot: ::slotted CSS passes through', () => {
+  const src = `<meta>
+name: x-card
+</meta>
+<template><slot></slot></template>
+<style>
+::slotted(p) { color: red; }
+::slotted(*) { margin: 0; }
+</style>`;
+  const r = compile(src, 'Card.flare');
+  assertSuccess(r);
+  assertContains(r.output, '::slotted');
+});
+
+test('slot: :host CSS compiles correctly', () => {
+  const src = `<meta>
+name: x-box
+</meta>
+<template><slot></slot></template>
+<style>
+:host { display: block; padding: 16px; }
+:host(.active) { border: 2px solid blue; }
+:host(:hover) { background: #f0f0f0; }
+</style>`;
+  const r = compile(src, 'Box.flare');
+  assertSuccess(r);
+  assertContains(r.output, ':host');
+});
+
+console.log('✓ All slot support tests passed');

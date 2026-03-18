@@ -537,7 +537,7 @@ function parseScript(content, startLine) {
 
     // ─── Lifecycle hooks ───
     // Format: on mount|unmount|adopt { ... }
-    if ((m = line.match(/^on\s+(mount|unmount|adopt)\s*\{/))) {
+    if ((m = line.match(/^on\s+(mount|unmount|adopt|formAssociated|formDisabled|formReset|formStateRestore)\s*\{/))) {
       // Multi-line block: collect until braces balance
       let body='', bc=1;
       i++;
@@ -1608,6 +1608,12 @@ function generate(c, options) {
     // Consume: user -> this.#user (access consumed context value)
     for(const co of cons) reps.push([new RegExp(`(?<!#)\\b${escRx(co)}\\b`,'g'), `this.#${co}`]);
 
+    // Form-associated helpers: setFormValue() -> this.#setFormValue(), setValidity() -> this.#setValidity()
+    if (c.meta.form) {
+      reps.push([/(?<!#)\bsetFormValue\(/g, 'this.#setFormValue(']);
+      reps.push([/(?<!#)\bsetValidity\(/g, 'this.#setValidity(']);
+    }
+
     return reps;
   }
 
@@ -2169,7 +2175,7 @@ function generate(c, options) {
     return txSafe(r, reps);
   }
 
-  const cn=tagToClass(c.meta.name||'x-component'),tn=c.meta.name||'x-component',sh=c.meta.shadow||'open',us=sh!=='none',root=us?'this.#shadow':'this';
+  const cn=tagToClass(c.meta.name||'x-component'),tn=c.meta.name||'x-component',sh=c.meta.shadow||'open',us=sh!=='none',root=us?'this.#shadow':'this',fa=!!c.meta.form;
 
   // Reset eid counter for this component
   _eid = 0;
@@ -2217,13 +2223,18 @@ function generate(c, options) {
   let o = importBlock;
   o += `(() => {\n"use strict";\n\n`;
   o += `class ${cn} extends HTMLElement {\n`;
+  // Form-associated custom element support
+  if (fa) {
+    o += `  static formAssociated = true;\n`;
+    o += `  #internals${ts ? ': ElementInternals' : ''};\n\n`;
+  }
   for(const d of c.script)if(d.kind==='state')o+=`  #${d.name}${ts?': '+typeToTs(d.type):''} = ${d.init};\n`;
   for(const d of c.script)if(d.kind==='provide')o+=`  #${d.name}${ts?': '+typeToTs(d.type):''} = ${d.init};\n`;
   for(const d of c.script)if(d.kind==='consume')o+=`  #${d.name}${ts?': '+typeToTs(d.type)+' | undefined':''} = undefined;\n`;
   for(const d of c.script)if(d.kind==='ref')o+=`  #${d.name}${ts?': '+typeToTs(d.type)+' | null':''} = null;\n`;
   if(us)o+=`  #shadow${ts?': ShadowRoot':''};\n`;o+=`  #listeners${ts?': [Element, string, EventListener][]':''} = [];\n\n`;
   if(pv.length){o+=`  static get observedAttributes() {\n    return [${pv.map(p=>`'${camelToKebab(p)}'`).join(', ')}];\n  }\n\n`;}
-  o+=`  constructor() {\n    super();\n`;if(us)o+=`    this.#shadow = this.attachShadow({ mode: '${sh}' });\n`;o+=`  }\n\n`;
+  o+=`  constructor() {\n    super();\n`;if(us)o+=`    this.#shadow = this.attachShadow({ mode: '${sh}' });\n`;if(fa)o+=`    this.#internals = this.attachInternals();\n`;o+=`  }\n\n`;
   o+=`  connectedCallback() {\n`;
   // shadow: none mode: add scoping attribute for CSS isolation
   if (!us) {
@@ -2275,6 +2286,37 @@ function generate(c, options) {
       const coerce = tn==='number'?'parseFloat(newVal) || 0':tn==='boolean'?"newVal !== null && newVal !== 'false'":"newVal || ''";
       o+=`    if (name === '${kebab}') { this.#prop_${d.name} = ${coerce}; this.#update(); }\n`;
     }
+    o+=`  }\n\n`;
+  }
+
+  // Form-associated lifecycle callbacks
+  if (fa) {
+    o+=`  formAssociatedCallback(form${ts ? ': HTMLFormElement' : ''}) {\n`;
+    for(const d of c.script) if(d.kind==='lifecycle'&&d.event==='formAssociated') o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;
+    o+=`  }\n\n`;
+    o+=`  formDisabledCallback(disabled${ts ? ': boolean' : ''}) {\n`;
+    for(const d of c.script) if(d.kind==='lifecycle'&&d.event==='formDisabled') o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;
+    o+=`  }\n\n`;
+    o+=`  formResetCallback() {\n`;
+    for(const d of c.script) if(d.kind==='lifecycle'&&d.event==='formReset') o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;
+    o+=`  }\n\n`;
+    o+=`  formStateRestoreCallback(state${ts ? ': string' : ''}, mode${ts ? ': string' : ''}) {\n`;
+    for(const d of c.script) if(d.kind==='lifecycle'&&d.event==='formStateRestore') o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;
+    o+=`  }\n\n`;
+    // Public form API helpers
+    o+=`  get form()${ts ? ': HTMLFormElement | null' : ''} { return this.#internals.form; }\n`;
+    o+=`  get validity()${ts ? ': ValidityState' : ''} { return this.#internals.validity; }\n`;
+    o+=`  get validationMessage()${ts ? ': string' : ''} { return this.#internals.validationMessage; }\n`;
+    o+=`  get willValidate()${ts ? ': boolean' : ''} { return this.#internals.willValidate; }\n`;
+    o+=`  checkValidity()${ts ? ': boolean' : ''} { return this.#internals.checkValidity(); }\n`;
+    o+=`  reportValidity()${ts ? ': boolean' : ''} { return this.#internals.reportValidity(); }\n\n`;
+    // Helper to set form value — exposed to script as setFormValue()
+    o+=`  #setFormValue(value${ts ? ': string | File | FormData | null' : ''}, state${ts ? '?: string | File | FormData | null' : ''}) {\n`;
+    o+=`    this.#internals.setFormValue(value, state);\n`;
+    o+=`  }\n\n`;
+    // Helper to set custom validity
+    o+=`  #setValidity(flags${ts ? ': ValidityStateFlags' : ''}, message${ts ? '?: string' : ''}, anchor${ts ? '?: HTMLElement' : ''}) {\n`;
+    o+=`    this.#internals.setValidity(flags, message, anchor);\n`;
     o+=`  }\n\n`;
   }
 
