@@ -5,11 +5,12 @@
   "description": "Flare - Template-first Web Component language",
   "workspaces": [
     "flare-cli",
-    "flare-vscode"
+    "flare-vscode",
+    "vite-plugin-flare"
   ],
   "scripts": {
     "build": "cd flare-cli && npm run build",
-    "test": "node --test flare-cli/test/compiler.test.js && node --test flare-cli/test/cli.test.js",
+    "test": "node --test flare-cli/test/compiler.test.js && node --test flare-cli/test/cli.test.js && node --test vite-plugin-flare/test/plugin.test.js",
     "check": "cd examples && node ../flare-cli/bin/flare.js check",
     "lint": "node -c flare-cli/lib/compiler.js && node -c flare-cli/bin/flare.js && node -c flare-vscode/extension.js"
   },

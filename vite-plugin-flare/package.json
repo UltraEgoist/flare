@@ -1,0 +1,27 @@
+{
+  "name": "vite-plugin-flare",
+  "version": "0.1.0",
+  "description": "Vite plugin for Flare (.flare) components - compile .flare files to Web Components",
+  "main": "index.js",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.mjs"
+  ],
+  "keywords": [
+    "vite",
+    "plugin",
+    "flare",
+    "web-components",
+    "compiler"
+  ],
+  "peerDependencies": {
+    "vite": ">=4.0.0"
+  },
+  "license": "MIT"
+}
