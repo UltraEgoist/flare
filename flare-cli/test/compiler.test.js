@@ -3318,3 +3318,254 @@ name: x-box
 });
 
 console.log('✓ All slot support tests passed');
+
+// ============================================================
+// SSR (Server-Side Rendering)
+// ============================================================
+
+const { renderToString } = require('../lib/compiler');
+
+test('SSR: basic renderToString with state', () => {
+  const src = `<meta>
+name: x-greeting
+</meta>
+<script>
+state name: string = "World"
+</script>
+<template>
+  <h1>Hello, {{ name }}!</h1>
+</template>`;
+  const r = renderToString(src, 'Greeting.flare');
+  assert.ok(r.success);
+  assert.equal(r.tagName, 'x-greeting');
+  assert.ok(r.html.includes('Hello, World!'));
+  assert.ok(r.html.includes('<template shadowrootmode="open">'));
+});
+
+test('SSR: prop override via props argument', () => {
+  const src = `<meta>
+name: x-card
+</meta>
+<script>
+prop title: string = "Default"
+</script>
+<template><h2>{{ title }}</h2></template>`;
+  const r = renderToString(src, 'Card.flare', { title: 'Custom' });
+  assert.ok(r.html.includes('Custom'));
+  assert.ok(r.html.includes('title="Custom"'));
+});
+
+test('SSR: style is minified and included', () => {
+  const src = `<meta>
+name: x-styled
+</meta>
+<template><p>hello</p></template>
+<style>
+p {
+  color: blue;
+  font-size: 16px;
+}
+</style>`;
+  const r = renderToString(src, 'Styled.flare');
+  assert.ok(r.html.includes('<style>'));
+  assert.ok(r.css.includes('color'));
+  // Should be minified (no excessive whitespace)
+  assert.ok(!r.css.includes('  '));
+});
+
+test('SSR: #if conditional rendering', () => {
+  const src = `<meta>
+name: x-cond
+</meta>
+<script>
+state visible: boolean = true
+</script>
+<template>
+  <#if condition="visible">
+    <p>shown</p>
+  <:else>
+    <p>hidden</p>
+  </#if>
+</template>`;
+  const r = renderToString(src, 'Cond.flare');
+  assert.ok(r.html.includes('shown'));
+  assert.ok(!r.html.includes('hidden'));
+});
+
+test('SSR: #for loop rendering', () => {
+  const src = `<meta>
+name: x-list
+</meta>
+<script>
+state items: string[] = ["A", "B", "C"]
+</script>
+<template>
+  <ul>
+    <#for each="item" of="items" key="item">
+      <li>{{ item }}</li>
+    </#for>
+  </ul>
+</template>`;
+  const r = renderToString(src, 'List.flare');
+  assert.ok(r.html.includes('<li>A</li>'));
+  assert.ok(r.html.includes('<li>B</li>'));
+  assert.ok(r.html.includes('<li>C</li>'));
+});
+
+test('SSR: shadow: none renders without template tag', () => {
+  const src = `<meta>
+name: x-inline
+shadow: none
+</meta>
+<template><span>inline</span></template>`;
+  const r = renderToString(src, 'Inline.flare');
+  assert.ok(!r.html.includes('shadowrootmode'));
+  assert.ok(r.html.includes('<span>inline</span>'));
+});
+
+test('SSR: HTML entities are escaped', () => {
+  const src = `<meta>
+name: x-safe
+</meta>
+<script>
+state text: string = "<script>alert('xss')</script>"
+</script>
+<template><p>{{ text }}</p></template>`;
+  const r = renderToString(src, 'Safe.flare');
+  assert.ok(!r.html.includes('<script>alert'));
+  assert.ok(r.html.includes('&lt;script&gt;'));
+});
+
+test('SSR: slot elements pass through', () => {
+  const src = `<meta>
+name: x-wrapper
+</meta>
+<template><div><slot></slot></div></template>`;
+  const r = renderToString(src, 'Wrapper.flare');
+  assert.ok(r.html.includes('<slot></slot>'));
+});
+
+console.log('✓ All SSR tests passed');
+
+// ============================================================
+// Const/Let Declarations
+// ============================================================
+
+test('const: compiles to private field', () => {
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+const MAX_COUNT = 100
+</script>
+<template><p>{{ MAX_COUNT }}</p></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+  assertContains(r.output, '#MAX_COUNT = 100');
+  assertContains(r.output, 'this.#MAX_COUNT');
+});
+
+test('let: compiles to private field', () => {
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+let counter = 0
+fn increment() {
+  counter += 1
+}
+</script>
+<template><p>{{ counter }}</p></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+  assertContains(r.output, '#counter = 0');
+  assertContains(r.output, 'this.#counter');
+});
+
+test('const: with type annotation', () => {
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+const API_URL: string = "https://api.example.com"
+state data: string = ""
+</script>
+<template><p>{{ data }}</p></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+  assertContains(r.output, '#API_URL');
+});
+
+test('const: usable in event handler', () => {
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+const handler = () => console.log("click")
+</script>
+<template><button @click="handler">test</button></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+  assertContains(r.output, 'this.#handler');
+});
+
+test('const: passes type checker', () => {
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+const EVENT_MAP = { CLICK: "click", HOVER: "hover" }
+fn handleEvent() {
+  console.log(EVENT_MAP.CLICK)
+}
+</script>
+<template><button @click="handleEvent">test</button></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+});
+
+// ============================================================
+// Import Path Rewriting
+// ============================================================
+
+test('import: .ts extension rewritten to .js', () => {
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+import Utils from "./lib/utils.ts"
+</script>
+<template><p>hello</p></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+  assertContains(r.output, './lib/utils.js');
+  assert.ok(!r.output.includes('./lib/utils.ts'));
+});
+
+test('import: .flare extension rewritten to .js', () => {
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+import "./components/Button.flare"
+</script>
+<template><p>hello</p></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+  assertContains(r.output, './components/Button.js');
+});
+
+test('import: non-ts path unchanged', () => {
+  const src = `<meta>
+name: x-test
+</meta>
+<script>
+import lodash from "lodash"
+</script>
+<template><p>hello</p></template>`;
+  const r = compile(src, 'x-test.flare');
+  assertSuccess(r);
+  assertContains(r.output, "from 'lodash'");
+});
+
+console.log('✓ All const/let and import tests passed');

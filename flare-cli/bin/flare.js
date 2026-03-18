@@ -387,8 +387,9 @@ function cmdBuild() {
       console.log(`  ${c.ok('✓')} → components/${outName} (${size} KB)`);
 
       // Bundle に追加するため、コンパイル済みソースコードを蓄積
-      // （コメント区切り付き）
-      bundleParts.push(`// ── ${fileName} ──\n${result.output}`);
+      // （コメント区切り付き、sourceMappingURL除去）
+      const bundleCode = result.output.replace(/\n\/\/# sourceMappingURL=.*$/, '');
+      bundleParts.push(`// ── ${fileName} ──\n${bundleCode}`);
 
       // NEW-OPT: Collect all used helpers across components for shared extraction
       if (optimize && result.usedHelpers) {
@@ -407,28 +408,174 @@ function cmdBuild() {
   // Bundle ファイルを dist/ ルートに生成
   // （個別ファイルとは異なり、すべてのコンポーネントを1つにまとめたもの）
   if (bundleParts.length > 0) {
-    const bundleHeader = `// Flare Bundle - ${new Date().toISOString()}\n// ${bundleParts.length} component(s)\n\n`;
-    // P2-40: Add comment warning if ESM format is requested (not yet fully supported)
-    // ESM 形式がリクエストされた場合の警告コメント
-    // （現在のバンドラーは script タグ形式のみサポート）
-    let esmWarning = '';
-    if (config.format === 'esm') {
-      esmWarning = `// WARNING: ESM format requested but bundler is script-tag only.\n// ESM support coming in a future version.\n`;
-    }
+    // Extract import statements from all bundle parts and deduplicate
+    // Import statements must be at the top of a module, so extract them from
+    // individual IIFE outputs and hoist them to bundle top level
+    const importSet = new Set();
+    const cleanedParts = bundleParts.map(part => {
+      const lines = part.split('\n');
+      const nonImportLines = [];
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('import ')) {
+          importSet.add(trimmed);
+        } else {
+          nonImportLines.push(line);
+        }
+      }
+      return nonImportLines.join('\n');
+    });
+
+    const hasImports = importSet.size > 0;
+    const importBlock = hasImports ? Array.from(importSet).join('\n') + '\n\n' : '';
+
+    const bundleHeader = `// Flare Bundle - ${new Date().toISOString()}\n// ${bundleParts.length} component(s)\n${hasImports ? '// NOTE: This bundle uses ES imports — load with <script type="module">\n' : ''}\n`;
     // デferred registration queue の宣言と初期化
     // （各コンポーネントクラスがこのキューに push 〜 末尾で一括 define）
     const deferred = `// Deferred registration queue: all classes are defined first,\n// then all customElements.define() calls happen at the end.\n// This ensures nested components work regardless of file order.\nconst __flareDefineQueue = [];\n\n`;
     // Bundle の末尾：キュー内のすべてのコンポーネントを customElements に登録
     const bundleFooter = `\n// Register all components at once (child components are available when parent renders)\n__flareDefineQueue.forEach(([tag, cls]) => {\n  if (!customElements.get(tag)) customElements.define(tag, cls);\n});\n`;
-    const bundleContent = bundleHeader + esmWarning + deferred + bundleParts.join('\n') + bundleFooter;
+    const bundleContent = bundleHeader + importBlock + deferred + cleanedParts.join('\n') + bundleFooter;
     const bundlePath = path.join(outDir, bundleName);
     fs.writeFileSync(bundlePath, bundleContent);
+
+    if (hasImports) {
+      console.log(`${c.warn('⚠')} バンドルに import 文が含まれています。<script type="module" src="${bundleName}"> で読み込んでください。`);
+    }
     const bundleSize = (Buffer.byteLength(bundleContent) / 1024).toFixed(1);
     console.log(`${c.info('▸')} Bundle: ${c.b(bundleName)} (${bundleSize} KB, ${bundleParts.length} components)`);
   }
 
-  console.log(`${c.ok('Done!')} ${success}/${success + fail} files compiled.\n`);
+  // ─── TypeScript file transpilation ───
+  // Copy and strip types from .ts files in src/ directory so they can be imported
+  // by compiled .flare components in the browser
+  const srcBase = path.resolve(config.src || args[1] || 'src');
+  const srcParent = path.dirname(srcDir); // parent of components dir
+  const tsFiles = collectTsFiles(srcParent);
+  if (tsFiles.length > 0) {
+    console.log(`\n${c.info('▸')} Transpiling ${tsFiles.length} TypeScript file(s)...`);
+    for (const tsFile of tsFiles) {
+      const relPath = path.relative(srcParent, tsFile);
+      const outPath = path.join(outDir, relPath.replace(/\.tsx?$/, '.js'));
+      const outDirForFile = path.dirname(outPath);
+      fs.mkdirSync(outDirForFile, { recursive: true });
+      const tsContent = fs.readFileSync(tsFile, 'utf-8');
+      const jsContent = stripTypes(tsContent);
+      fs.writeFileSync(outPath, jsContent);
+      console.log(`  ${c.ok('✓')} → ${path.relative(outDir, outPath)}`);
+    }
+  }
+
+  console.log(`\n${c.ok('Done!')} ${success}/${success + fail} files compiled.\n`);
   if (fail > 0) process.exit(1);
+}
+
+/**
+ * Collect all .ts and .tsx files in a directory recursively.
+ * Excludes node_modules and hidden directories.
+ *
+ * @param {string} dir - Directory to search
+ * @returns {string[]} Array of file paths
+ */
+function collectTsFiles(dir) {
+  const results = [];
+  if (!fs.existsSync(dir)) return results;
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      // Skip the components directory (handled by Flare compiler)
+      if (entry.name === 'components') continue;
+      results.push(...collectTsFiles(fullPath));
+    } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
+
+/**
+ * Simple TypeScript type stripping for browser-compatible output.
+ *
+ * Strips: type annotations, interfaces, type aliases, enums (declaration only),
+ * generics, `as` casts, non-null assertions (!), and export type declarations.
+ * Preserves: runtime code, import values, class/function/const bodies.
+ *
+ * This is NOT a full TypeScript compiler — for complex TS code use tsc or esbuild.
+ *
+ * @param {string} code - TypeScript source code
+ * @returns {string} JavaScript-compatible output
+ */
+function stripTypes(code) {
+  const lines = code.split('\n');
+  const result = [];
+  let skipBlock = false;
+  let blockDepth = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // Skip type-only imports: import type { ... } from '...'
+    if (trimmed.match(/^import\s+type\s+/)) continue;
+    // Skip interface declarations (potentially multi-line)
+    if (trimmed.match(/^(export\s+)?interface\s+/)) {
+      skipBlock = true;
+      blockDepth = 0;
+      for (let j = 0; j < line.length; j++) {
+        if (line[j] === '{') blockDepth++;
+        if (line[j] === '}') blockDepth--;
+      }
+      if (blockDepth <= 0) skipBlock = false;
+      continue;
+    }
+    // Skip type aliases: type X = ...
+    if (trimmed.match(/^(export\s+)?type\s+\w+\s*[<=]/)) continue;
+    // Skip enum declarations (multi-line)
+    if (trimmed.match(/^(export\s+)?(const\s+)?enum\s+/)) {
+      skipBlock = true;
+      blockDepth = 0;
+      for (let j = 0; j < line.length; j++) {
+        if (line[j] === '{') blockDepth++;
+        if (line[j] === '}') blockDepth--;
+      }
+      if (blockDepth <= 0) skipBlock = false;
+      continue;
+    }
+
+    if (skipBlock) {
+      for (let j = 0; j < line.length; j++) {
+        if (line[j] === '{') blockDepth++;
+        if (line[j] === '}') blockDepth--;
+      }
+      if (blockDepth <= 0) skipBlock = false;
+      continue;
+    }
+
+    // Strip inline type annotations from the line
+    let processed = line;
+    // Remove type assertions: expr as Type
+    processed = processed.replace(/\s+as\s+\w[\w<>\[\],\s|&]*(?=[,;\)\]\}]|$)/g, '');
+    // Remove non-null assertions: expr!.prop -> expr.prop
+    processed = processed.replace(/!(\.|[)\]])/g, '$1');
+    // Remove function return type: ): Type { -> ) {
+    processed = processed.replace(/\)\s*:\s*[\w<>\[\],\s|&?{}]+\s*(?=\{|=>)/g, ') ');
+    // Remove parameter types: (name: Type) -> (name)
+    processed = processed.replace(/(\w+)\s*:\s*[\w<>\[\],\s|&?{}]+(?=[,\)])/g, '$1');
+    // Remove variable type annotations: const x: Type = -> const x =
+    processed = processed.replace(/((?:const|let|var)\s+\w+)\s*:\s*[\w<>\[\],\s|&?{}]+\s*=/g, '$1 =');
+    // Remove generic type parameters from function/class declarations
+    processed = processed.replace(/((?:function|class)\s+\w+)<[^>]+>/g, '$1');
+    // Strip import { type X, Y } -> import { Y }
+    processed = processed.replace(/,\s*type\s+\w+/g, '');
+    processed = processed.replace(/type\s+\w+\s*,\s*/g, '');
+    // Remove .ts/.tsx extensions from imports
+    processed = processed.replace(/(from\s+['"])([^'"]+)\.tsx?(['"])/g, '$1$2.js$3');
+
+    result.push(processed);
+  }
+  return result.join('\n');
 }
 
 // ═══════════════════════════════════════════
@@ -1134,8 +1281,9 @@ function buildAll(srcDir, outDir) {
         fs.writeFileSync(mapPath, JSON.stringify(result.sourceMap, null, 2));
       }
 
-      // バンドル用に蓄積
-      bundleParts.push(`// ── ${fileName} ──\n${result.output}`);
+      // バンドル用に蓄積（sourceMappingURL除去）
+      const bundleCode = result.output.replace(/\n\/\/# sourceMappingURL=.*$/, '');
+      bundleParts.push(`// ── ${fileName} ──\n${bundleCode}`);
       success++;
     } else {
       fail++;

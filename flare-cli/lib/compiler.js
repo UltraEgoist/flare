@@ -579,6 +579,34 @@ function parseScript(content, startLine) {
       continue;
     }
 
+    // ─── Const declarations (non-reactive private constants) ───
+    // Format: const varName: type = initialValue
+    // Format: const varName = initialValue (type inferred)
+    if ((m = line.match(/^const\s+(\w+)\s*(?::\s*([^=]+))?\s*=\s*(.+)$/))) {
+      decls.push({
+        kind:'const',
+        name: m[1],
+        type: m[2] ? parseType(m[2].trim()) : { kind: 'primitive', name: 'any' },
+        init: m[3].trim(),
+        span: {line: ln}
+      });
+      i++; continue;
+    }
+
+    // ─── Let declarations (non-reactive private variables) ───
+    // Format: let varName: type = initialValue
+    // Format: let varName = initialValue (type inferred)
+    if ((m = line.match(/^let\s+(\w+)\s*(?::\s*([^=]+))?\s*=\s*(.+)$/))) {
+      decls.push({
+        kind:'let',
+        name: m[1],
+        type: m[2] ? parseType(m[2].trim()) : { kind: 'primitive', name: 'any' },
+        init: m[3].trim(),
+        span: {line: ln}
+      });
+      i++; continue;
+    }
+
     // ─── Provide declarations ───
     // Format: provide varName: type = initialValue
     // Used for context/dependency injection
@@ -1089,7 +1117,7 @@ class TypeChecker {
       if(d.defaultImport)this.symbols.set(d.defaultImport,{type:{kind:'primitive',name:'any'},source:'import'});
       if(d.namedImports)for(const ni of d.namedImports){const name=ni.includes(':')?ni.split(':')[1]:ni;this.symbols.set(name,{type:{kind:'primitive',name:'any'},source:'import'});}
       break;
-      case'state':this.symbols.set(d.name,{type:d.type,source:'state'});break;case'prop':this.symbols.set(d.name,{type:d.type,source:'prop'});break;case'computed':this.symbols.set(d.name,{type:d.type,source:'computed'});break;case'fn':this.symbols.set(d.name,{type:d.returnType||{kind:'primitive',name:'void'},source:'fn'});break;case'emit':this.symbols.set(d.name,{type:d.type,source:'emit'});break;case'ref':this.symbols.set(d.name,{type:d.type,source:'ref'});break;case'provide':this.symbols.set(d.name,{type:d.type,source:'provide'});break;case'consume':this.symbols.set(d.name,{type:d.type,source:'consume'});break;case'type':this.typeAliases.set(d.name,d.type);break;}}}
+      case'state':this.symbols.set(d.name,{type:d.type,source:'state'});break;case'prop':this.symbols.set(d.name,{type:d.type,source:'prop'});break;case'computed':this.symbols.set(d.name,{type:d.type,source:'computed'});break;case'fn':this.symbols.set(d.name,{type:d.returnType||{kind:'primitive',name:'void'},source:'fn'});break;case'emit':this.symbols.set(d.name,{type:d.type,source:'emit'});break;case'ref':this.symbols.set(d.name,{type:d.type,source:'ref'});break;case'provide':this.symbols.set(d.name,{type:d.type,source:'provide'});break;case'consume':this.symbols.set(d.name,{type:d.type,source:'consume'});break;case'const':this.symbols.set(d.name,{type:d.type,source:'const'});break;case'let':this.symbols.set(d.name,{type:d.type,source:'let'});break;case'type':this.typeAliases.set(d.name,d.type);break;}}}
   checkScript(){
     for(const d of this.c.script){
       if(d.kind==='state'){const t=this.infer(d.init);if(t&&!this.assignable(t,d.type))this.diags.push({level:'error',code:'E0201',message:msg('E0201',{id:d.name}),span:d.span});}
@@ -1377,7 +1405,8 @@ function generate(c, options) {
         rn=[],    // ref names
         fn=[],    // function names
         prov=[],  // provide names
-        cons=[];  // consume names
+        cons=[],  // consume names
+        cn_vars=[]; // const/let variable names
 
   for(const d of c.script){
     switch(d.kind){
@@ -1389,6 +1418,7 @@ function generate(c, options) {
       case'fn':fn.push(d.name);break;
       case'provide':prov.push(d.name);sv.push(d.name);break;
       case'consume':cons.push(d.name);break;
+      case'const':case'let':cn_vars.push(d.name);break;
     }
   }
 
@@ -1607,6 +1637,9 @@ function generate(c, options) {
 
     // Consume: user -> this.#user (access consumed context value)
     for(const co of cons) reps.push([new RegExp(`(?<!#)\\b${escRx(co)}\\b`,'g'), `this.#${co}`]);
+
+    // Const/Let: myConst -> this.#myConst (access private field)
+    for(const v of cn_vars) reps.push([new RegExp(`(?<!#)\\b${escRx(v)}\\b`,'g'), `this.#${v}`]);
 
     // Form-associated helpers: setFormValue() -> this.#setFormValue(), setValidity() -> this.#setValidity()
     if (c.meta.form) {
@@ -2031,6 +2064,10 @@ function generate(c, options) {
     if (cv.includes(name)) {
       return `(typeof this.#${name} === 'function' ? this.#${name}(e) : this.#${name})`;
     }
+    if (cn_vars.includes(name)) {
+      // const/let variable → could hold a function or value
+      return `(typeof this.#${name} === 'function' ? this.#${name}(e) : this.#${name})`;
+    }
     // Fallback: assume it's a method
     return `this.#${name}(e)`;
   }
@@ -2192,6 +2229,13 @@ function generate(c, options) {
   let importBlock = '';
   if (hasImports) {
     for (const imp of imports) {
+      // Rewrite .ts/.tsx extensions to .js for browser compatibility
+      let fromPath = imp.from;
+      if (fromPath.endsWith('.ts')) fromPath = fromPath.slice(0, -3) + '.js';
+      else if (fromPath.endsWith('.tsx')) fromPath = fromPath.slice(0, -4) + '.js';
+      // Also rewrite .flare imports to .js
+      if (fromPath.endsWith('.flare')) fromPath = fromPath.slice(0, -6) + '.js';
+
       const parts = [];
       if (imp.defaultImport) parts.push(imp.defaultImport);
       if (imp.namedImports) {
@@ -2211,9 +2255,9 @@ function generate(c, options) {
       }
       if (parts.length === 0) {
         // Side-effect import: import './module.js'
-        importBlock += `import '${imp.from}';\n`;
+        importBlock += `import '${fromPath}';\n`;
       } else {
-        importBlock += `import ${parts.join(', ')} from '${imp.from}';\n`;
+        importBlock += `import ${parts.join(', ')} from '${fromPath}';\n`;
       }
     }
     importBlock += '\n';
@@ -2229,6 +2273,8 @@ function generate(c, options) {
     o += `  #internals${ts ? ': ElementInternals' : ''};\n\n`;
   }
   for(const d of c.script)if(d.kind==='state')o+=`  #${d.name}${ts?': '+typeToTs(d.type):''} = ${d.init};\n`;
+  for(const d of c.script)if(d.kind==='const')o+=`  #${d.name}${ts?': '+typeToTs(d.type):''} = ${d.init};\n`;
+  for(const d of c.script)if(d.kind==='let')o+=`  #${d.name}${ts?': '+typeToTs(d.type):''} = ${d.init};\n`;
   for(const d of c.script)if(d.kind==='provide')o+=`  #${d.name}${ts?': '+typeToTs(d.type):''} = ${d.init};\n`;
   for(const d of c.script)if(d.kind==='consume')o+=`  #${d.name}${ts?': '+typeToTs(d.type)+' | undefined':''} = undefined;\n`;
   for(const d of c.script)if(d.kind==='ref')o+=`  #${d.name}${ts?': '+typeToTs(d.type)+' | null':''} = null;\n`;
@@ -2714,6 +2760,259 @@ function compile(source, fileName, options) {
 }
 
 // ============================================================
+// SSR (Server-Side Rendering) Support
+// ============================================================
+
+/**
+ * Render a Flare component to static HTML string for SSR.
+ *
+ * Uses Declarative Shadow DOM (`<template shadowrootmode>`) for hydration.
+ * Initial state is evaluated and embedded in the HTML output.
+ *
+ * @param {string} source - Raw .flare file content
+ * @param {string} [fileName] - File name for diagnostics
+ * @param {Object} [props] - Initial prop values to override defaults
+ * @returns {{ html: string, css: string, tagName: string, success: boolean, diagnostics: Array }}
+ *
+ * @example
+ * const { renderToString } = require('@aspect/flare');
+ * const { html } = renderToString(fs.readFileSync('Card.flare', 'utf-8'), 'Card.flare', { title: 'Hello' });
+ * // Returns: <x-card><template shadowrootmode="open"><style>...</style><div>Hello</div></template></x-card>
+ */
+function renderToString(source, fileName, props = {}) {
+  // Phase 1-3: Parse and type-check (reuse compile pipeline)
+  const blocks = splitBlocks(source);
+  const diagnostics = [];
+  let meta = {}, script = [], template = [], style = '';
+
+  for (const b of blocks) {
+    switch (b.type) {
+      case 'meta': meta = parseMeta(b.content); break;
+      case 'script': script = parseScript(b.content, b.startLine, diagnostics); break;
+      case 'template': template = parseTemplateNodes(b.content); break;
+      case 'style': style = b.content.trim(); break;
+    }
+  }
+
+  const tagName = meta.name || 'x-component';
+  const useShadow = (meta.shadow || 'open') !== 'none';
+
+  // Build initial values from state declarations and prop overrides
+  const values = {};
+  for (const d of script) {
+    if (d.kind === 'state') {
+      try {
+        // Evaluate simple literals safely
+        values[d.name] = evalSafeInit(d.init);
+      } catch {
+        values[d.name] = d.init; // Keep as string if can't evaluate
+      }
+    }
+    if (d.kind === 'prop') {
+      const propVal = props[d.name];
+      if (propVal !== undefined) {
+        values[d.name] = propVal;
+      } else if (d.default) {
+        try {
+          values[d.name] = evalSafeInit(d.default);
+        } catch {
+          values[d.name] = d.default;
+        }
+      }
+    }
+    if (d.kind === 'computed') {
+      // Computed values need expression evaluation — store expr for later
+      values[`__computed_${d.name}`] = d.expr;
+    }
+  }
+
+  // Render template nodes to HTML string
+  function renderNodes(nodes) {
+    let html = '';
+    for (const node of nodes) {
+      if (node.kind === 'text') {
+        html += escHtml(node.value);
+      } else if (node.kind === 'interpolation') {
+        // Try to resolve the expression from known values
+        const resolved = resolveExpr(node.expr, values);
+        html += escHtml(String(resolved));
+      } else if (node.kind === 'element') {
+        // Skip directives for SSR — render static content
+        html += `<${node.tag}`;
+        for (const attr of (node.attrs || [])) {
+          if (attr.event) continue; // Skip event handlers
+          if (attr.dynamic) {
+            // Try to resolve dynamic attributes
+            const val = resolveExpr(attr.value, values);
+            if (attr.name === 'class' && typeof val === 'object' && val !== null) {
+              if (Array.isArray(val)) {
+                html += ` class="${escHtml(val.filter(Boolean).join(' '))}"`;
+              } else {
+                const cls = Object.entries(val).filter(([, b]) => b).map(([k]) => k).join(' ');
+                html += ` class="${escHtml(cls)}"`;
+              }
+            } else if (val != null && val !== false) {
+              html += ` ${attr.name}="${escHtml(String(val))}"`;
+            }
+          } else if (attr.name !== 'data-flare-id') {
+            html += ` ${attr.name}="${escHtml(attr.value)}"`;
+          }
+        }
+        if (node.selfClosing) {
+          html += ' />';
+        } else {
+          html += '>';
+          if (node.children) html += renderNodes(node.children);
+          html += `</${node.tag}>`;
+        }
+      } else if (node.kind === 'if') {
+        // For SSR, evaluate condition and render matching branch
+        const cond = resolveExpr(node.condition, values);
+        if (cond) {
+          html += renderNodes(node.children || []);
+        } else if (node.elseIf) {
+          for (const branch of node.elseIf) {
+            if (branch.condition) {
+              const branchCond = resolveExpr(branch.condition, values);
+              if (branchCond) {
+                html += renderNodes(branch.children || []);
+                break;
+              }
+            } else {
+              // :else branch
+              html += renderNodes(branch.children || []);
+              break;
+            }
+          }
+        }
+      } else if (node.kind === 'for') {
+        // For SSR, try to evaluate the array and render items
+        const arr = resolveExpr(node.of, values);
+        if (Array.isArray(arr)) {
+          for (let i = 0; i < arr.length; i++) {
+            const itemValues = { ...values, [node.each]: arr[i] };
+            if (node.index) itemValues[node.index] = i;
+            html += renderNodesWithContext(node.children || [], itemValues);
+          }
+          if (arr.length === 0 && node.empty) {
+            html += renderNodes(node.empty);
+          }
+        }
+      }
+    }
+    return html;
+  }
+
+  function renderNodesWithContext(nodes, ctx) {
+    const oldValues = { ...values };
+    Object.assign(values, ctx);
+    const html = renderNodes(nodes);
+    // Restore original values
+    for (const key of Object.keys(ctx)) {
+      if (key in oldValues) {
+        values[key] = oldValues[key];
+      } else {
+        delete values[key];
+      }
+    }
+    return html;
+  }
+
+  // Safely evaluate simple JavaScript literals
+  function evalSafeInit(expr) {
+    // Only allow safe literals: strings, numbers, booleans, null, arrays, objects
+    const trimmed = expr.trim();
+    if (trimmed === 'true') return true;
+    if (trimmed === 'false') return false;
+    if (trimmed === 'null') return null;
+    if (trimmed === 'undefined') return undefined;
+    if (trimmed === '""' || trimmed === "''") return '';
+    if (trimmed === '[]') return [];
+    if (trimmed === '{}') return {};
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
+    if (/^["'].*["']$/.test(trimmed)) return trimmed.slice(1, -1);
+    // Try JSON parse for arrays and objects
+    try { return JSON.parse(trimmed); } catch { /* fall through */ }
+    return trimmed;
+  }
+
+  // Resolve an expression against known values
+  function resolveExpr(expr, ctx) {
+    if (!expr) return '';
+    const trimmed = expr.trim();
+    // Direct variable reference
+    if (ctx[trimmed] !== undefined) return ctx[trimmed];
+    // Computed value
+    if (ctx[`__computed_${trimmed}`]) {
+      return resolveExpr(ctx[`__computed_${trimmed}`], ctx);
+    }
+    // Simple property access: obj.prop
+    const dotMatch = trimmed.match(/^(\w+)\.(\w+)$/);
+    if (dotMatch && ctx[dotMatch[1]] && typeof ctx[dotMatch[1]] === 'object') {
+      return ctx[dotMatch[1]][dotMatch[2]];
+    }
+    // Ternary: cond ? a : b
+    const ternaryMatch = trimmed.match(/^(\w+)\s*\?\s*(.+)\s*:\s*(.+)$/);
+    if (ternaryMatch) {
+      const cond = resolveExpr(ternaryMatch[1], ctx);
+      return cond ? resolveExpr(ternaryMatch[2].trim(), ctx) : resolveExpr(ternaryMatch[3].trim(), ctx);
+    }
+    // Template literal: `text ${expr}`
+    if (trimmed.startsWith('`') && trimmed.endsWith('`')) {
+      return trimmed.slice(1, -1).replace(/\$\{([^}]+)\}/g, (_, e) => {
+        const val = resolveExpr(e.trim(), ctx);
+        return val != null ? String(val) : '';
+      });
+    }
+    // String concatenation or other complex expressions — return as-is
+    return trimmed;
+  }
+
+  // Escape HTML entities
+  function escHtml(s) {
+    if (typeof s !== 'string') return String(s ?? '');
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // Render the template
+  const templateHtml = renderNodes(template);
+
+  // Minify CSS
+  const minifiedCss = style ? style.replace(/\s+/g, ' ').replace(/\s*{\s*/g, '{').replace(/\s*}\s*/g, '}').replace(/\s*:\s*/g, ':').replace(/\s*;\s*/g, ';').trim() : '';
+
+  // Build final HTML
+  let html = `<${tagName}`;
+  // Add prop attributes
+  for (const d of script) {
+    if (d.kind === 'prop' && props[d.name] !== undefined) {
+      const kebab = d.name.replace(/[A-Z]/g, c => '-' + c.toLowerCase());
+      html += ` ${kebab}="${escHtml(String(props[d.name]))}"`;
+    }
+  }
+  html += '>';
+
+  if (useShadow) {
+    html += `<template shadowrootmode="${meta.shadow || 'open'}">`;
+    if (minifiedCss) html += `<style>${minifiedCss}</style>`;
+    html += templateHtml;
+    html += '</template>';
+  } else {
+    // shadow: none — inline content directly
+    html += templateHtml;
+  }
+
+  html += `</${tagName}>`;
+
+  return {
+    html,
+    css: minifiedCss,
+    tagName,
+    success: diagnostics.every(d => d.level !== 'error'),
+    diagnostics,
+  };
+}
+
+// ============================================================
 // Source Map Support (VLQ encoding and generation)
 // ============================================================
 
@@ -2885,5 +3184,6 @@ module.exports = {
   TypeChecker,          // For testing type checking
   generate,             // For testing code generation
   collectCustomElements, // For resolving component dependencies
-  resolveComponents     // For auto-import resolution
+  resolveComponents,    // For auto-import resolution
+  renderToString        // SSR: render component to static HTML
 };

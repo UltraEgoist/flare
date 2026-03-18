@@ -56,7 +56,7 @@
         ] },
         { "begin": "/\\*", "end": "\\*/", "name": "comment.block.flare" },
         { "match": "\\b(emit)(?:\\s*\\(([^)]*)\\))?\\s+(\\w+)", "captures": { "1": {"name":"keyword.declaration.flare"}, "2": {"name":"entity.other.attribute-name.modifier.flare"}, "3": {"name":"variable.other.event.flare"} } },
-        { "match": "\\b(state|prop|computed|ref|provide|consume)\\b", "name": "keyword.declaration.flare" },
+        { "match": "\\b(state|prop|computed|ref|provide|consume|const|let)\\b", "name": "keyword.declaration.flare" },
         { "match": "\\b(fn)\\s+(async\\s+)?(\\w+)", "captures": { "1": {"name":"keyword.function.flare"}, "2": {"name":"storage.modifier.async.flare"}, "3": {"name":"entity.name.function.flare"} } },
         { "match": "\\b(fn)\\b", "name": "keyword.function.flare" },
         { "match": "\\b(watch|provide|consume)\\b", "name": "keyword.control.flare" },

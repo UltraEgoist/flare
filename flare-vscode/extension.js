@@ -140,6 +140,8 @@ function deactivate() {
 const HOVER = {
   // ── Script declarations ──
   'state': '**state** — リアクティブ変数\n\n内部状態を宣言します。値を変更するとテンプレートが自動更新されます。\n\n```flare\nstate count: number = 0\nstate name: string = "hello"\nstate items: string[] = []\n```\n\n型注釈と初期値が必須です。',
+  'const': '**const** — 非リアクティブ定数\n\nコンポーネント内で使用するプライベート定数を宣言します。\n値の変更はDOMに反映されません。\n\n```flare\nconst MAX_COUNT = 100\nconst API_URL: string = "https://api.example.com"\nconst handler = () => console.log("click")\n```\n\n型注釈は省略可能。イベントハンドラとしても使えます: `@click="handler"`',
+  'let': '**let** — 非リアクティブ変数\n\nコンポーネント内で使用するプライベート変数を宣言します。\n値の変更はDOMに反映されません（stateとの違い）。\n\n```flare\nlet counter = 0\nlet cache: object = {}\n```\n\n型注釈は省略可能。DOM更新が不要な内部状態に使います。',
   'prop': '**prop** — 外部属性\n\n親から受け取る属性を宣言します。HTML属性として反映・監視されます。\n\n```flare\nprop label: string               // 必須\nprop size: number = 16            // デフォルト付き\nprop disabled: boolean = false\n```\n\n型による反映: `string` → getAttribute, `number` → parseFloat, `boolean` → 属性の有無',
   'computed': '**computed** — 派生値\n\nstate/propから自動計算される読み取り専用の値です。依存値が変わると再計算されます。\n\n```flare\ncomputed total: number = items.reduce((s, i) => s + i.price, 0)\ncomputed isValid: boolean = name.length > 0\n```',
   'fn': '**fn** — 関数定義\n\nコンポーネントのプライベートメソッドを定義します。\n内部でstateを変更するとDOMが自動更新されます。\n\n```flare\nfn increment() {\n  count += 1\n}\n\nfn greet(name: string): string {\n  return `Hello, ${name}!`\n}\n\nfn async fetchData() {\n  data = await fetch("/api").then(r => r.json())\n}\n```\n\n**コンパイル結果**: `fn` はクラスの **private メソッド** (`#name()`) に変換されます。\n`this` はコンポーネントインスタンスを指します（Arrow関数ではありません）。\n\n**イベントハンドラとして使う場合**:\n- `@click="increment"` → `(e) => { this.#increment(e); this.#update(); }` に展開\n- ハンドラには `e` (イベントオブジェクト) が自動的に第1引数として渡されます\n- `state` 変数に関数を格納して渡すことも可能です',
@@ -348,7 +350,7 @@ function provideHover(document, position) {
   if (syms && syms.has(word)) {
     const sym = syms.get(word);
     let md = '';
-    const sourceLabel = { state: 'state', prop: 'prop', computed: 'computed', fn: 'fn', emit: 'emit', ref: 'ref', provide: 'provide', consume: 'consume' };
+    const sourceLabel = { state: 'state', prop: 'prop', computed: 'computed', fn: 'fn', emit: 'emit', ref: 'ref', provide: 'provide', consume: 'consume', 'const': 'const', 'let': 'let' };
     const kind = sourceLabel[sym.source] || sym.source;
 
     // ── シグネチャ行の構築 ──
@@ -381,6 +383,14 @@ function provideHover(document, position) {
       // コールバック prop の場合
       if (sym.type.toLowerCase().includes('function') || sym.type.includes('=>')) {
         md += `*コールバック* — 親から渡された関数。\`@click="${word}"\` で使用可能\n\n`;
+      }
+    } else if (sym.source === 'const' || sym.source === 'let') {
+      const initDisplay = sym.init ? (sym.init.length > 50 ? sym.init.substring(0, 47) + '...' : sym.init) : '';
+      const initStr = initDisplay ? ` = ${initDisplay}` : '';
+      md += `\`\`\`flare\n${kind} ${word}: ${sym.type}${initStr}\n\`\`\`\n\n`;
+      md += `*非リアクティブ* — 値の変更はDOMに反映されません。\n\n`;
+      if (sym.init && (sym.init.includes('=>') || sym.init.includes('function'))) {
+        md += `*関数式* — \`@click="${word}"\` でイベントハンドラとして使用可能\n\n`;
       }
     } else {
       // ref, provide, consume 等
@@ -445,6 +455,8 @@ function mkHover(md, range) {
 const COMPLETIONS = {
   // Script keywords
   'state': { kind: vscode.CompletionItemKind.Keyword, detail: 'リアクティブ変数', insertText: 'state ${1:name}: ${2:type} = ${3:value}' },
+  'const': { kind: vscode.CompletionItemKind.Keyword, detail: '非リアクティブ定数', insertText: 'const ${1:NAME} = ${2:value}' },
+  'let': { kind: vscode.CompletionItemKind.Keyword, detail: '非リアクティブ変数', insertText: 'let ${1:name} = ${2:value}' },
   'prop': { kind: vscode.CompletionItemKind.Keyword, detail: '外部属性', insertText: 'prop ${1:name}: ${2:type}' },
   'computed': { kind: vscode.CompletionItemKind.Keyword, detail: '派生値', insertText: 'computed ${1:name}: ${2:type} = ${3:expr}' },
   'emit': { kind: vscode.CompletionItemKind.Keyword, detail: 'カスタムイベント', insertText: 'emit ${1:name}: ${2:type}' },
@@ -920,6 +932,16 @@ function runDiagnostics(document) {
       // consume name: type
       if ((m = line.match(/^consume\s+(\w+)\s*:\s*(.+)$/)))
         symbols.set(m[1], { type: m[2].trim(), source: 'consume', line: docLine, doc: jsDoc });
+
+      // ── const 宣言 ──
+      // const name: type = value  または  const name = value
+      if ((m = line.match(/^const\s+(\w+)\s*(?::\s*([^=]+))?\s*=\s*(.+)$/)))
+        symbols.set(m[1], { type: m[2]?.trim() || 'any', source: 'const', line: docLine, init: m[3].trim(), doc: jsDoc });
+
+      // ── let 宣言 ──
+      // let name: type = value  または  let name = value
+      if ((m = line.match(/^let\s+(\w+)\s*(?::\s*([^=]+))?\s*=\s*(.+)$/)))
+        symbols.set(m[1], { type: m[2]?.trim() || 'any', source: 'let', line: docLine, init: m[3].trim(), doc: jsDoc });
 
       // ── watch 依存チェック ──
       // watch(...) { ... } の括弧内で参照される値が宣言されているか確認

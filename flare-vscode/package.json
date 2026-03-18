@@ -47,8 +47,6 @@
         "path": "./syntaxes/flare.tmLanguage.json",
         "embeddedLanguages": {
           "source.css": "css",
-          "source.js": "javascript",
-          "source.ts": "typescript",
           "text.html.basic": "html"
         }
       }
