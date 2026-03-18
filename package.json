@@ -8,11 +8,12 @@
     "flare-vscode",
     "vite-plugin-flare",
     "flare-router",
-    "flare-store"
+    "flare-store",
+    "flare-ui"
   ],
   "scripts": {
     "build": "cd flare-cli && npm run build",
-    "test": "node --test flare-cli/test/compiler.test.js && node --test flare-cli/test/cli.test.js && node --test vite-plugin-flare/test/plugin.test.js && node --test flare-router/test/router.test.js && node --test flare-store/test/store.test.js",
+    "test": "node --test flare-cli/test/compiler.test.js && node --test flare-cli/test/cli.test.js && node --test vite-plugin-flare/test/plugin.test.js && node --test flare-router/test/router.test.js && node --test flare-store/test/store.test.js && node --test flare-ui/test/components.test.js",
     "check": "cd examples && node ../flare-cli/bin/flare.js check",
     "lint": "node -c flare-cli/lib/compiler.js && node -c flare-cli/bin/flare.js && node -c flare-vscode/extension.js"
   },

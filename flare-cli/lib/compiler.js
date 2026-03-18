@@ -1341,6 +1341,10 @@ class TypeChecker {
     if(to.kind==='union') {
       return to.types.some(t => this.assignable(from, t));
     }
+    // String primitive is assignable to string literal (default values like "primary" match "primary"|"secondary")
+    if(from.kind==='primitive'&&from.name==='string'&&to.kind==='literal') return true;
+    // Number primitive is assignable to number literal
+    if(from.kind==='primitive'&&from.name==='number'&&to.kind==='literal'&&/^\d/.test(to.value)) return true;
     return false;
   }
   similar(name){let best=null,bd=Infinity;for(const[k]of this.symbols){const d=lev(name,k);if(d<bd&&d<=2){bd=d;best=k;}}return best;}
