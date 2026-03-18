@@ -60,7 +60,7 @@
         { "match": "\\b(fn)\\s+(async\\s+)?(\\w+)", "captures": { "1": {"name":"keyword.function.flare"}, "2": {"name":"storage.modifier.async.flare"}, "3": {"name":"entity.name.function.flare"} } },
         { "match": "\\b(fn)\\b", "name": "keyword.function.flare" },
         { "match": "\\b(watch|provide|consume)\\b", "name": "keyword.control.flare" },
-        { "match": "\\b(on)\\s+(mount|unmount|adopt|update)\\b", "captures": { "1": {"name":"keyword.control.flare"}, "2": {"name":"entity.name.function.lifecycle.flare"} } },
+        { "match": "\\b(on)\\s+(mount|unmount|adopt|update|formAssociated|formDisabled|formReset|formStateRestore)\\b", "captures": { "1": {"name":"keyword.control.flare"}, "2": {"name":"entity.name.function.lifecycle.flare"} } },
         { "match": "\\b(type)\\s+(\\w+)\\s*=", "captures": { "1": {"name":"keyword.declaration.type.flare"}, "2": {"name":"entity.name.type.flare"} } },
         { "match": "\\b(import)\\s+(['\"])(.+?)\\2\\s*$", "captures": { "1": {"name":"keyword.control.import.flare"}, "3": {"name":"string.quoted.module.flare"} } },
         { "match": "\\b(import)\\s+(.+?)\\s+(from)\\s+(['\"])(.+?)\\4", "captures": { "1": {"name":"keyword.control.import.flare"}, "2": {"name":"variable.other.readwrite.flare"}, "3": {"name":"keyword.control.from.flare"}, "5": {"name":"string.quoted.module.flare"} } },

@@ -174,6 +174,15 @@ const HOVER = {
   // ── Meta fields ──
   'name': '**name** — カスタム要素タグ名\n\nハイフンを1つ以上含む必要があります。\n\n```flare\n<meta>\n  name: "x-button"\n</meta>\n```\n\n省略時はファイル名から自動生成されます。',
   'shadow': '**shadow** — Shadow DOMモード\n\n```\nshadow: open     // 外部からアクセス可能（デフォルト）\nshadow: closed   // 外部からアクセス不可\nshadow: none     // Shadow DOM不使用\n```\n\n`none` はTailwind等の外部CSSと併用する場合に便利です。',
+  'form': '**form** — フォーム連携\n\nコンポーネントをForm-Associated Custom Elementにします。\n\n```flare\n<meta>\n  name: x-input\n  form: true\n</meta>\n```\n\n有効にすると:\n- `setFormValue(value)` でフォーム値を設定\n- `setValidity(flags, message)` でバリデーション\n- `on formReset { }` 等のフォームライフサイクル使用可\n- `form`, `validity`, `checkValidity()` 等のAPI自動公開',
+
+  // ── Form lifecycle ──
+  'formReset': '**on formReset** — フォームリセット\n\nフォームの `reset` 時に呼ばれます。初期値への復元処理を記述。\n\n```flare\non formReset {\n  value = ""\n  setFormValue("")\n}\n```',
+  'formAssociated': '**on formAssociated** — フォーム関連付け\n\nコンポーネントが `<form>` に関連付けられた時に呼ばれます。\n\n```flare\non formAssociated {\n  // form がセットされた\n}\n```',
+  'formDisabled': '**on formDisabled** — フォーム無効化\n\n`<fieldset disabled>` 等でフォーム要素が無効化された時に呼ばれます。\n\n```flare\non formDisabled {\n  // disabled 状態の処理\n}\n```',
+  'formStateRestore': '**on formStateRestore** — フォーム状態復元\n\nブラウザによるフォーム状態の自動復元時に呼ばれます。\n\n```flare\non formStateRestore {\n  // state, mode が引数として渡される\n}\n```',
+  'setFormValue': '**setFormValue** — フォーム値設定\n\n`form: true` 時に使用可能。`ElementInternals.setFormValue()` を呼びます。\n\n```flare\nsetFormValue(value)          // 文字列\nsetFormValue(value, state)   // 値とブラウザ復元用状態\nsetFormValue(formData)       // FormDataオブジェクト\n```',
+  'setValidity': '**setValidity** — バリデーション設定\n\n`form: true` 時に使用可能。`ElementInternals.setValidity()` を呼びます。\n\n```flare\nsetValidity({ valueMissing: true }, "入力必須です")\nsetValidity({})              // バリデーションをクリア\n```',
 };
 
 /**
@@ -203,7 +212,7 @@ function detectBlock(document, lineNumber) {
 }
 
 // メタブロック専用キーワード — <script>内ではユーザー定義シンボルを優先
-const META_ONLY_HOVER_KEYS = new Set(['name', 'shadow']);
+const META_ONLY_HOVER_KEYS = new Set(['name', 'shadow', 'form']);
 
 /**
  * ホバードキュメントプロバイダー
@@ -444,6 +453,12 @@ const COMPLETIONS = {
   'on mount': { kind: vscode.CompletionItemKind.Keyword, detail: 'マウント時の処理', insertText: 'on mount {\n  ${1:}\n}' },
   'on unmount': { kind: vscode.CompletionItemKind.Keyword, detail: 'アンマウント時の処理', insertText: 'on unmount {\n  ${1:}\n}' },
   'on adopt': { kind: vscode.CompletionItemKind.Keyword, detail: 'スロット採用時の処理', insertText: 'on adopt {\n  ${1:}\n}' },
+  'on formReset': { kind: vscode.CompletionItemKind.Keyword, detail: 'フォームリセット時', insertText: 'on formReset {\n  ${1:}\n}' },
+  'on formAssociated': { kind: vscode.CompletionItemKind.Keyword, detail: 'フォーム関連付け時', insertText: 'on formAssociated {\n  ${1:}\n}' },
+  'on formDisabled': { kind: vscode.CompletionItemKind.Keyword, detail: 'フォーム無効化時', insertText: 'on formDisabled {\n  ${1:}\n}' },
+  'on formStateRestore': { kind: vscode.CompletionItemKind.Keyword, detail: 'フォーム復元時', insertText: 'on formStateRestore {\n  ${1:}\n}' },
+  'setFormValue': { kind: vscode.CompletionItemKind.Function, detail: 'フォーム値設定', insertText: 'setFormValue(${1:value})' },
+  'setValidity': { kind: vscode.CompletionItemKind.Function, detail: 'バリデーション設定', insertText: 'setValidity(${1:flags}, ${2:message})' },
   'watch': { kind: vscode.CompletionItemKind.Keyword, detail: '副作用', insertText: 'watch(${1:dependency}) {\n  ${2:}\n}' },
   'provide': { kind: vscode.CompletionItemKind.Keyword, detail: 'コンテキスト提供', insertText: 'provide ${1:name}: ${2:type} = ${3:value}' },
   'consume': { kind: vscode.CompletionItemKind.Keyword, detail: 'コンテキスト受信', insertText: 'consume ${1:name}: ${2:type}' },
