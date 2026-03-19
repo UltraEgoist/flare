@@ -421,15 +421,26 @@ function combineStores(stores) {
 // Utilities
 // ============================================================
 
-function deepClone(obj) {
+function deepClone(obj, depth = 0, seen = new WeakSet()) {
   if (obj === null || typeof obj !== 'object') return obj;
-  if (Array.isArray(obj)) return obj.map(deepClone);
+  // セキュリティ: 深度制限でスタックオーバーフローを防止
+  if (depth > 50) {
+    console.warn('[flare-store] deepClone: maximum depth exceeded, returning shallow copy');
+    return Array.isArray(obj) ? [...obj] : Object.assign({}, obj);
+  }
+  // セキュリティ: 循環参照を検出して無限再帰を防止
+  if (seen.has(obj)) {
+    console.warn('[flare-store] deepClone: circular reference detected, returning null');
+    return null;
+  }
+  seen.add(obj);
+  if (Array.isArray(obj)) return obj.map(item => deepClone(item, depth + 1, seen));
   if (obj instanceof Date) return new Date(obj.getTime());
   if (obj instanceof RegExp) return new RegExp(obj.source, obj.flags);
   const result = {};
   for (const key in obj) {
     if (Object.prototype.hasOwnProperty.call(obj, key)) {
-      result[key] = deepClone(obj[key]);
+      result[key] = deepClone(obj[key], depth + 1, seen);
     }
   }
   return result;

@@ -120,6 +120,19 @@ function createRouter(options = {}) {
   }
 
   async function navigateInternal(to, replace) {
+    // セキュリティ: 危険なプロトコルスキームやクロスオリジンURLを拒否
+    if (typeof to === 'string') {
+      const trimmed = to.trim();
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed) && !trimmed.startsWith('//')) {
+        console.error('[flare-router] Blocked navigation to dangerous URL:', trimmed);
+        return false;
+      }
+      if (trimmed.startsWith('//')) {
+        console.error('[flare-router] Blocked navigation to protocol-relative URL:', trimmed);
+        return false;
+      }
+    }
+
     const loc = typeof to === 'string' ? parsePath(to) : to;
     const { route, params } = resolve(loc.pathname);
     const newRoute = {

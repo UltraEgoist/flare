@@ -789,8 +789,19 @@ function cmdDev() {
       }
 
       // 新しいコンポーネントコードを実行してクラスを再定義
+      // セキュリティ: eval() の代わりに <script> 要素を動的生成して実行
       try {
-        eval(code);
+        const blob = new Blob([code], { type: 'text/javascript' });
+        const url = URL.createObjectURL(blob);
+        const script = document.createElement('script');
+        script.src = url;
+        script.onload = () => URL.revokeObjectURL(url);
+        script.onerror = () => {
+          URL.revokeObjectURL(url);
+          console.error('[HMR] Failed to load component code');
+          location.reload();
+        };
+        document.head.appendChild(script);
       } catch (err) {
         console.error('[HMR] Failed to evaluate component code:', err);
         // コード評価失敗時はフルリロード
@@ -948,8 +959,8 @@ function cmdDev() {
           'Content-Type': mime + '; charset=utf-8',
           'Cache-Control': 'no-cache',  // 開発中はキャッシュさせない
           'X-Content-Type-Options': 'nosniff',  // MIME スニッフィング防止
-          'Access-Control-Allow-Origin': '*',  // 開発時は全オリジンを許可
-          'Content-Security-Policy': "default-src 'self' 'unsafe-inline'",  // S-06: unsafe-eval を除去
+          'Access-Control-Allow-Origin': 'http://localhost:' + port,  // セキュリティ: localhost のみ許可
+          'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' blob:",  // セキュリティ: blob: を許可（HMR用）、unsafe-inline を script から除去
         });
 
         // HTML ファイルの場合、HMR ランタイムを注入
@@ -1031,7 +1042,8 @@ function cmdDev() {
     }
   });
 
-  server.listen(port, () => {
+  // セキュリティ: 127.0.0.1 にバインドし、外部ネットワークからの接続を拒否
+  server.listen(port, '127.0.0.1', () => {
     if (hmrEnabled) {
       console.log(`${c.ok('▸')} Dev server: ${c.b(`http://localhost:${port}`)} ${c.d('(HMR enabled)')}`);
     } else {

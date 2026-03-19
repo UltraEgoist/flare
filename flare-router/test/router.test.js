@@ -280,3 +280,39 @@ describe('createRouter', () => {
     assert.equal(r.component, 'x-about');
   });
 });
+
+// ============================================================
+// Security: Path validation
+// ============================================================
+
+describe('createRouter - security', () => {
+  it('should block javascript: URLs', async () => {
+    const router = createRouter({ routes: [{ path: '/', component: 'x-home' }] });
+    const result = await router.push('javascript:alert(1)');
+    assert.equal(result, false);
+  });
+
+  it('should block data: URLs', async () => {
+    const router = createRouter({ routes: [{ path: '/', component: 'x-home' }] });
+    const result = await router.push('data:text/html,<h1>XSS</h1>');
+    assert.equal(result, false);
+  });
+
+  it('should block protocol-relative URLs', async () => {
+    const router = createRouter({ routes: [{ path: '/', component: 'x-home' }] });
+    const result = await router.push('//attacker.com/phishing');
+    assert.equal(result, false);
+  });
+
+  it('should block vbscript: URLs', async () => {
+    const router = createRouter({ routes: [{ path: '/', component: 'x-home' }] });
+    const result = await router.push('vbscript:MsgBox("XSS")');
+    assert.equal(result, false);
+  });
+
+  it('should allow normal relative paths', async () => {
+    const router = createRouter({ routes: [{ path: '/about', component: 'x-about' }] });
+    const result = await router.push('/about');
+    assert.notEqual(result, false);
+  });
+});

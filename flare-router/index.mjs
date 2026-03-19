@@ -192,6 +192,21 @@ function createRouter(options = {}) {
   }
 
   async function navigate(to, replace = false) {
+    // セキュリティ: 危険なプロトコルスキームやクロスオリジンURLを拒否
+    if (typeof to === 'string') {
+      const trimmed = to.trim();
+      // javascript:, data:, vbscript: 等のスキームを拒否
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed) && !trimmed.startsWith('//')) {
+        console.error('[flare-router] Blocked navigation to dangerous URL:', trimmed);
+        return false;
+      }
+      // プロトコル相対URL（//attacker.com）を拒否
+      if (trimmed.startsWith('//')) {
+        console.error('[flare-router] Blocked navigation to protocol-relative URL:', trimmed);
+        return false;
+      }
+    }
+
     const loc = typeof to === 'string' ? parsePath(to) : to;
     const { route, params } = resolve(loc.pathname);
 

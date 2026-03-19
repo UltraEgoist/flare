@@ -415,3 +415,42 @@ describe('store metadata', () => {
     assert.equal(calls, 0); // subscriber was cleared
   });
 });
+
+// ============================================================
+// Security: deepClone safety
+// ============================================================
+
+describe('deepClone - security', () => {
+  it('should handle circular references without stack overflow', () => {
+    const useStore = createStore({
+      state: { count: 0 },
+      actions: {
+        setCircular(state) {
+          const obj = { a: 1 };
+          obj.self = obj; // circular reference
+          return { ...state, data: obj };
+        },
+      },
+    });
+    const store = useStore();
+    // Should not throw stack overflow
+    assert.doesNotThrow(() => store.dispatch('setCircular'));
+  });
+
+  it('should handle deeply nested objects without stack overflow', () => {
+    // Build a 60-level deep object
+    let deep = { value: 'leaf' };
+    for (let i = 0; i < 60; i++) {
+      deep = { child: deep };
+    }
+    const useStore = createStore({
+      state: { data: null },
+      actions: {
+        setDeep(state, payload) { return { ...state, data: payload }; },
+      },
+    });
+    const store = useStore();
+    // Should not throw — beyond depth 50 it shallow-copies instead of overflowing
+    assert.doesNotThrow(() => store.dispatch('setDeep', deep));
+  });
+});
