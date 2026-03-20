@@ -3,9 +3,19 @@
   "version": "0.1.0",
   "description": "Official UI component library for Flare — pre-built, accessible Web Components",
   "main": "dist/flare-ui.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/flare-ui.js",
+      "types": "./index.d.ts"
+    },
+    "./components/*": "./dist/*.js"
+  },
+  "sideEffects": true,
   "files": [
     "dist/",
-    "components/"
+    "components/",
+    "index.d.ts"
   ],
   "scripts": {
     "build": "node build.js",

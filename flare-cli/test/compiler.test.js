@@ -3708,3 +3708,45 @@ state data: Array<string> | null = null
 });
 
 console.log('✓ All generic type tests passed');
+
+// ── Error Boundary Tests ──
+
+test('compile - on error lifecycle hook generates #handleError method', () => {
+  const src = `
+<meta>
+name: x-err
+</meta>
+<script>
+state count: number = 0
+
+fn doError() {
+  throw new Error("test error")
+}
+
+on error {
+  console.log("caught:", error.message)
+}
+</script>
+<template><p>{{ count }}</p></template>`;
+  const r = compile(src, 'x-err.flare');
+  assertSuccess(r);
+  assert.ok(r.output.includes('#handleError'), 'should have #handleError method');
+  assert.ok(r.output.includes('try {'), 'should have try-catch in connectedCallback');
+  assert.ok(r.output.includes('Component error'), 'should have error fallback UI');
+});
+
+test('compile - component without on error has no error boundary', () => {
+  const src = `
+<meta>
+name: x-no-err
+</meta>
+<script>
+state count: number = 0
+</script>
+<template><p>{{ count }}</p></template>`;
+  const r = compile(src, 'x-no-err.flare');
+  assertSuccess(r);
+  assert.ok(!r.output.includes('#handleError'), 'should not have #handleError method');
+});
+
+console.log('✓ All error boundary tests passed');

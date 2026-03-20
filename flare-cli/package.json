@@ -3,6 +3,7 @@
   "version": "0.2.0",
   "description": "Flare - Template-first Web Component compiler. Compiles .flare template files into JavaScript Web Components.",
   "main": "lib/compiler.js",
+  "types": "index.d.ts",
   "bin": {
     "flare": "./bin/flare.js"
   },

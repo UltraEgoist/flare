@@ -608,7 +608,7 @@ function parseScript(content, startLine) {
 
     // ─── Lifecycle hooks ───
     // Format: on mount|unmount|adopt { ... }
-    if ((m = line.match(/^on\s+(mount|unmount|adopt|formAssociated|formDisabled|formReset|formStateRestore)\s*\{/))) {
+    if ((m = line.match(/^on\s+(mount|unmount|adopt|error|formAssociated|formDisabled|formReset|formStateRestore)\s*\{/))) {
       // Multi-line block: collect until braces balance
       let body='', bc=1;
       i++;
@@ -2391,7 +2391,10 @@ function generate(c, options) {
   if(us)o+=`  #shadow${ts?': ShadowRoot':''};\n`;o+=`  #listeners${ts?': [Element, string, EventListener][]':''} = [];\n\n`;
   if(pv.length){o+=`  static get observedAttributes() {\n    return [${pv.map(p=>`'${camelToKebab(p)}'`).join(', ')}];\n  }\n\n`;}
   o+=`  constructor() {\n    super();\n`;if(us)o+=`    this.#shadow = this.attachShadow({ mode: '${sh}' });\n`;if(fa)o+=`    this.#internals = this.attachInternals();\n`;o+=`  }\n\n`;
+  // Error boundary: check if component has on error handler
+  const hasErrorHandler = c.script.some(d => d.kind==='lifecycle' && d.event==='error');
   o+=`  connectedCallback() {\n`;
+  if (hasErrorHandler) o+=`   try {\n`;
   // shadow: none mode: add scoping attribute for CSS isolation
   if (!us) {
     o+=`    this.setAttribute('data-flare-scope', '${tn}');\n`;
@@ -2422,6 +2425,11 @@ function generate(c, options) {
   }
   o+=`    this.#render();\n    this.#bindEvents();\n    this.#bindRefs();\n`;
   for(const d of c.script)if(d.kind==='lifecycle'&&d.event==='mount')o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;
+  if (hasErrorHandler) {
+    o+=`   } catch (__err) {\n`;
+    o+=`    this.#handleError(__err);\n`;
+    o+=`   }\n`;
+  }
   o+=`  }\n\n`;
   o+=`  disconnectedCallback() {\n    this.#listeners.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));\n    this.#listeners = [];\n`;for(const d of c.script)if(d.kind==='lifecycle'&&d.event==='unmount')o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;o+=`  }\n\n`;
   // adoptedCallback
@@ -2581,6 +2589,7 @@ function generate(c, options) {
 
   // #update - diff-based re-render (preserves DOM state)
   if(optimize){usedHelpers.add('patch');usedHelpers.add('getNewTree');}o+=`  #update() {\n`;
+  if (hasErrorHandler) o+=`   try {\n`;
   o+=`    this.#listeners.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));\n`;
   o+=`    this.#listeners = [];\n`;
   // S-09: Sanitize watch dep names for valid JS identifiers (e.g., "obj.x" → "obj_x")
@@ -2606,6 +2615,11 @@ function generate(c, options) {
       o+=`    }\n`;
     }
   }
+  if (hasErrorHandler) {
+    o+=`   } catch (__err) {\n`;
+    o+=`    this.#handleError(__err);\n`;
+    o+=`   }\n`;
+  }
   o+=`  }\n\n`;
 
   // #updateKeepFocus - with diff-based patching, focus is preserved naturally
@@ -2613,6 +2627,26 @@ function generate(c, options) {
   o+=`  #updateKeepFocus(focusedEl) {\n`;
   o+=`    this.#update();\n`;
   o+=`  }\n\n`;
+
+  // #handleError - error boundary handler
+  if (hasErrorHandler) {
+    o+=`  #handleError(__err) {\n`;
+    o+=`    console.error('[${tn}] Component error:', __err);\n`;
+    // Execute user's on error handler
+    for(const d of c.script) {
+      if(d.kind==='lifecycle'&&d.event==='error') {
+        o+=`    const error = __err;\n`;
+        o+=`    ${tx(d.body).split('\n').join('\n    ')}\n`;
+      }
+    }
+    // Render a fallback error UI if the component has shadow DOM
+    o+=`    try {\n`;
+    o+=`      ${root}.innerHTML = '<div style="padding:1rem;border:1px solid #ef4444;border-radius:6px;background:#fef2f2;color:#991b1b;font-family:sans-serif">' +\n`;
+    o+=`        '<strong style="display:block;margin-bottom:0.5rem">Component Error</strong>' +\n`;
+    o+=`        '<code style="font-size:0.85em">' + this.#esc(String(__err.message || __err)) + '</code></div>';\n`;
+    o+=`    } catch (e) { /* fallback rendering failed */ }\n`;
+    o+=`  }\n\n`;
+  }
 
   // #esc - HTML text content escaping (prevents XSS in {{ }} interpolation)
   if (!optimize || usedHelpers.has('esc')) {

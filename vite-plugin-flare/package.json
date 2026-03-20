@@ -3,15 +3,20 @@
   "version": "0.1.0",
   "description": "Vite plugin for Flare (.flare) components - compile .flare files to Web Components",
   "main": "index.js",
+  "module": "index.mjs",
+  "types": "index.d.ts",
   "exports": {
     ".": {
       "import": "./index.mjs",
-      "require": "./index.js"
+      "require": "./index.js",
+      "types": "./index.d.ts"
     }
   },
+  "sideEffects": false,
   "files": [
     "index.js",
-    "index.mjs"
+    "index.mjs",
+    "index.d.ts"
   ],
   "keywords": [
     "vite",
