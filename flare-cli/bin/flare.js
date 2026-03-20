@@ -745,8 +745,15 @@ function cmdDev() {
   };
 
   // HMR ランタイムスクリプト：ブラウザが実行するコード
+  // Fine-grained HMR: コンポーネントレベルのホットリプレース
+  // - __flareClasses グローバルレジストリで新旧クラスを管理
+  // - 状態の保存・復元でスムーズな更新体験を実現
+  // - プロトタイプスワップにより customElements.define() の制約を回避
   const HMR_RUNTIME = `
 (function() {
+  // HMR クラスレジストリ: コンパイラ出力が新クラスをここに登録
+  window.__flareClasses = window.__flareClasses || {};
+
   let socket = null;
   let connected = false;
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -780,6 +787,50 @@ function cmdDev() {
     };
   }
 
+  /**
+   * 状態を保存する。プライベートフィールドへはアクセスできないため、
+   * __flareState（コンパイラが生成する公開状態オブジェクト）を利用。
+   * さらに属性値もバックアップする。
+   */
+  function saveState(el) {
+    const state = {};
+    // __flareState が公開されている場合はそれを保存
+    if (el.__flareState && typeof el.__flareState === 'object') {
+      try {
+        state.flareState = JSON.parse(JSON.stringify(el.__flareState));
+      } catch (e) {
+        // 循環参照等で保存できない場合はスキップ
+      }
+    }
+    // 属性を保存
+    state.attributes = {};
+    for (const attr of el.attributes) {
+      state.attributes[attr.name] = attr.value;
+    }
+    return state;
+  }
+
+  /**
+   * 保存した状態を復元する
+   */
+  function restoreState(el, state) {
+    if (!state) return;
+    // __flareState を復元
+    if (state.flareState && el.__flareState) {
+      try {
+        Object.assign(el.__flareState, state.flareState);
+      } catch (e) {
+        // 復元失敗は無視
+      }
+    }
+    // 属性を復元
+    if (state.attributes) {
+      for (const [name, value] of Object.entries(state.attributes)) {
+        try { el.setAttribute(name, value); } catch (e) {}
+      }
+    }
+  }
+
   function handleHMRUpdate(msg) {
     try {
       const { component, code } = msg;
@@ -788,88 +839,101 @@ function cmdDev() {
         return;
       }
 
-      // 新しいコンポーネントコードを実行してクラスを再定義
-      // セキュリティ: eval() の代わりに <script> 要素を動的生成して実行
-      try {
-        const blob = new Blob([code], { type: 'text/javascript' });
-        const url = URL.createObjectURL(blob);
-        const script = document.createElement('script');
-        script.src = url;
-        script.onload = () => URL.revokeObjectURL(url);
-        script.onerror = () => {
-          URL.revokeObjectURL(url);
-          console.error('[HMR] Failed to load component code');
-          location.reload();
-        };
-        document.head.appendChild(script);
-      } catch (err) {
-        console.error('[HMR] Failed to evaluate component code:', err);
-        // コード評価失敗時はフルリロード
-        location.reload();
-        return;
-      }
-
-      // DOM内のコンポーネント要素を全て検索
+      // DOM内のコンポーネント要素を事前に検索し、状態を保存
       const elements = document.querySelectorAll(component);
-      if (elements.length === 0) {
-        console.log('[HMR] No elements found for', component);
-        return;
+      const savedStates = new Map();
+      for (const el of elements) {
+        savedStates.set(el, saveState(el));
       }
 
-      console.log('[HMR] Updating', component, 'count:', elements.length);
+      // 新しいコンポーネントコードを実行
+      // セキュリティ: eval() の代わりに Blob URL + <script> で実行
+      const blob = new Blob([code], { type: 'text/javascript' });
+      const url = URL.createObjectURL(blob);
+      const script = document.createElement('script');
+      script.src = url;
 
-      // 各要素を更新試行
-      for (const el of elements) {
-        try {
-          // 新しいクラス定義を取得（コンポーネント変数として存在するはず）
-          const className = getComponentClassName(component);
-          if (!className) {
-            console.warn('[HMR] Could not find class for', component);
-            location.reload();
-            return;
-          }
+      script.onload = () => {
+        URL.revokeObjectURL(url);
 
-          // 状態を保存（最善の努力）
-          const savedState = el.__flareState ? JSON.parse(JSON.stringify(el.__flareState)) : {};
-
-          // 要素を新しいインスタンスで置き換え（状態保持の改善版）
-          // shadowDOM の内容をクリア（再レンダリングをトリガー）
-          if (el.shadowRoot) {
-            el.shadowRoot.innerHTML = '';
-          }
-
-          // connectedCallback を手動呼び出してリセット
-          if (el.connectedCallback) {
-            el.connectedCallback();
-          }
-
-          // 状態を復元試行
-          if (savedState && Object.keys(savedState).length > 0) {
-            try {
-              Object.assign(el.__flareState || {}, savedState);
-            } catch (e) {
-              // 状態復元失敗は無視（デフォルト値を使用）
-            }
-          }
-        } catch (err) {
-          console.error('[HMR] Failed to update element', component, ':', err);
+        // __flareClasses から新しいクラスを取得
+        const NewClass = window.__flareClasses[component];
+        if (!NewClass) {
+          console.warn('[HMR] New class not found for', component, '- falling back to reload');
           location.reload();
           return;
         }
-      }
 
-      console.log('[HMR] Successfully updated', component);
+        if (elements.length === 0) {
+          console.log('[HMR] No elements found for', component, '(class registered for future use)');
+          return;
+        }
+
+        console.log('[HMR] Updating', component, ':', elements.length, 'instance(s)');
+
+        // 各要素を更新
+        let updateSuccess = true;
+        for (const el of elements) {
+          try {
+            const state = savedStates.get(el);
+
+            // プロトタイプを新しいクラスに差し替え
+            // これにより既存インスタンスのメソッド（#update, イベントハンドラ等）が
+            // 新しい実装に切り替わる
+            Object.setPrototypeOf(el, NewClass.prototype);
+
+            // Shadow DOM をクリアして再レンダリング
+            if (el.shadowRoot) {
+              el.shadowRoot.innerHTML = '';
+            }
+
+            // connectedCallback を再実行（テンプレート・スタイル・イベントの再構築）
+            if (typeof el.connectedCallback === 'function') {
+              el.connectedCallback();
+            }
+
+            // 状態を復元して再描画
+            restoreState(el, state);
+
+            // 復元後に #update() を呼んで最新状態を DOM に反映
+            if (typeof el.update === 'function') {
+              el.update();
+            } else if (el.__flareState && typeof el.connectedCallback === 'function') {
+              // __flareState 復元後は connectedCallback で再描画済みだが、
+              // 状態復元分は手動トリガーが必要な場合がある
+              // プライベートメソッド #update はプロトタイプ経由で呼べないため、
+              // 属性変更で間接的にトリガー
+              try {
+                const tempAttr = '__hmr_refresh_' + Date.now();
+                el.setAttribute(tempAttr, '1');
+                el.removeAttribute(tempAttr);
+              } catch (e) {}
+            }
+          } catch (err) {
+            console.error('[HMR] Failed to update element:', err);
+            updateSuccess = false;
+          }
+        }
+
+        if (updateSuccess) {
+          console.log('[HMR] ✓ Successfully updated', component);
+        } else {
+          console.warn('[HMR] Some updates failed for', component, '- try full reload');
+          location.reload();
+        }
+      };
+
+      script.onerror = () => {
+        URL.revokeObjectURL(url);
+        console.error('[HMR] Failed to load component code, falling back to reload');
+        location.reload();
+      };
+
+      document.head.appendChild(script);
     } catch (err) {
       console.error('[HMR] Update handler error:', err);
       location.reload();
     }
-  }
-
-  function getComponentClassName(tagName) {
-    // コンポーネント変数名を推測（例：x-counter → XCounter）
-    const parts = tagName.split('-');
-    const className = parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join('');
-    return className;
   }
 
   // 接続開始
@@ -1235,9 +1299,10 @@ function updateBundle(srcDir, outDir) {
   // バンドルを生成
   if (bundleParts.length > 0) {
     const bundleHeader = `// Flare Bundle - ${new Date().toISOString()}\n// ${bundleParts.length} component(s)\n\n`;
+    const hmrRegistry = `// HMR class registry (dev mode)\nif (typeof window !== 'undefined') window.__flareClasses = window.__flareClasses || {};\n\n`;
     const deferred = `const __flareDefineQueue = [];\n\n`;
     const bundleFooter = `\n__flareDefineQueue.forEach(([tag, cls]) => {\n  if (!customElements.get(tag)) customElements.define(tag, cls);\n});\n`;
-    const bundleContent = bundleHeader + deferred + bundleParts.join('\n') + bundleFooter;
+    const bundleContent = bundleHeader + hmrRegistry + deferred + bundleParts.join('\n') + bundleFooter;
     fs.writeFileSync(path.join(outDir, bundleName), bundleContent);
   }
 }
@@ -1317,11 +1382,13 @@ function buildAll(srcDir, outDir) {
     if (config.format === 'esm') {
       esmWarning = `// WARNING: ESM format requested but bundler is script-tag only.\n// ESM support coming in a future version.\n`;
     }
+    // HMR class registry (dev mode)
+    const hmrRegistry = `if (typeof window !== 'undefined') window.__flareClasses = window.__flareClasses || {};\n\n`;
     // デferred registration queue の初期化
     const deferred = `const __flareDefineQueue = [];\n\n`;
     // 全コンポーネントを一括登録
     const bundleFooter = `\n__flareDefineQueue.forEach(([tag, cls]) => {\n  if (!customElements.get(tag)) customElements.define(tag, cls);\n});\n`;
-    fs.writeFileSync(path.join(outDir, bundleName), bundleHeader + esmWarning + deferred + bundleParts.join('\n') + bundleFooter);
+    fs.writeFileSync(path.join(outDir, bundleName), bundleHeader + esmWarning + hmrRegistry + deferred + bundleParts.join('\n') + bundleFooter);
   }
 
   // コンパイル結果をコンソール表示

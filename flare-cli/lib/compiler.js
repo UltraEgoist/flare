@@ -2685,9 +2685,13 @@ function generate(c, options) {
   o+=`}\n\n`;
   // Deferred registration: if __flareDefineQueue exists (bundle mode), push to queue.
   // Otherwise register immediately (standalone mode).
+  // HMR support: store latest class in global registry for hot-swapping.
+  o+=`if (typeof __flareClasses !== 'undefined') {\n`;
+  o+=`  __flareClasses['${tn}'] = ${cn};\n`;
+  o+=`}\n`;
   o+=`if (typeof __flareDefineQueue !== 'undefined') {\n`;
   o+=`  __flareDefineQueue.push(['${tn}', ${cn}]);\n`;
-  o+=`} else {\n`;
+  o+=`} else if (!customElements.get('${tn}')) {\n`;
   o+=`  customElements.define('${tn}', ${cn});\n`;
   o+=`}\n`;
 

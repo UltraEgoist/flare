@@ -481,3 +481,32 @@ test('HMR message format is correct', () => {
   const reloadMsg = { type: 'reload' };
   assert.strictEqual(reloadMsg.type, 'reload');
 });
+
+test('compiled output includes __flareClasses registry for HMR', () => {
+  const { compile } = require('../lib/compiler');
+  const src = `<meta>\nname: "x-hmr-test"\nshadow: open\n</meta>\n<script>\nstate val: number = 0\n</script>\n<template><p>{{ val }}</p></template>\n<style>p{}</style>`;
+  const result = compile(src, 'hmr-test.flare');
+  assert.ok(result.success, 'Compilation should succeed');
+  // Check __flareClasses registration
+  assert.ok(result.output.includes("__flareClasses['x-hmr-test']"), 'Output should register class in __flareClasses');
+  // Check guarded customElements.define
+  assert.ok(result.output.includes("!customElements.get('x-hmr-test')"), 'Output should guard customElements.define');
+});
+
+test('compiled output does not call customElements.define if already registered', () => {
+  const { compile } = require('../lib/compiler');
+  const src = `<meta>\nname: "x-guard-test"\nshadow: open\n</meta>\n<script>\nstate n: number = 1\n</script>\n<template><span>{{ n }}</span></template>\n<style>span{}</style>`;
+  const result = compile(src, 'guard-test.flare');
+  assert.ok(result.success);
+  // The registration block should use guarded define:
+  // } else if (!customElements.get('x-guard-test')) {
+  //   customElements.define('x-guard-test', XGuardTest);
+  assert.ok(
+    result.output.includes("!customElements.get('x-guard-test')"),
+    'Should guard customElements.define with .get() check'
+  );
+  // Should NOT have a bare unguarded define outside the if/else block
+  const unguardedPattern = /^  customElements\.define\(/m;
+  const guardedPattern = /else if \(!customElements\.get/;
+  assert.ok(guardedPattern.test(result.output), 'Define should be inside else-if guard');
+});

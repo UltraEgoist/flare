@@ -184,26 +184,52 @@ Features:
 | `flare build` | Production build |
 | `flare check` | Type check only |
 
+## Ecosystem
+
+| Package | Description |
+|---------|-------------|
+| `@aspect/flare` | Compiler & CLI |
+| `@aspect/flare-router` | SPA routing with `<flare-router>`, `<flare-link>` |
+| `@aspect/flare-store` | Flux-like state management with undo/redo |
+| `@aspect/flare-ui` | 9 accessible UI components (`<fl-button>`, `<fl-dialog>`, etc.) |
+| `@aspect/vite-plugin-flare` | Vite integration with HMR |
+| `flare-vscode` | VS Code extension |
+
+## Documentation
+
+- [Getting Started ガイド](docs/getting-started.md) — 初めての方はこちら
+- [API リファレンス](docs/api/) — 各パッケージの詳細な API
+- [技術学習ガイド](docs/LEARNING_GUIDE.md) — コンパイラの内部構造
+- [セキュリティ監査](docs/security/SECURITY_AUDIT.md) — セキュリティ設計の詳細
+
+## Roadmap
+
+- [x] TypeScript output (`--target ts` with `.d.ts` generation)
+- [x] Scoped CSS for `shadow: none` mode
+- [x] Comprehensive test suite (441 tests)
+- [x] XSS protection (auto-escape for text, attributes, and URLs)
+- [x] Rust compiler implementation (experimental, in `flare-compiler-rust/`)
+- [x] Source Map V3 support (`.js.map` generation for browser DevTools)
+- [x] Diff-based DOM rendering (morphdom-lite patching)
+- [x] HMR (Hot Module Replacement) in dev server
+- [x] Error boundaries (`on error` lifecycle hook)
+- [x] TypeScript type definitions (`.d.ts` for all packages)
+- [x] Router — SPA routing with guards, params, nested routes
+- [x] Store — State management with middleware, undo/redo
+- [x] UI component library (9 components)
+- [x] Security hardening (eval elimination, URL validation, CSP)
+- [ ] SSR (Server-Side Rendering) support
+- [ ] Language Server Protocol (LSP) for full TypeScript type checking
+- [ ] npm package publishing & CI/CD
+- [ ] Playwright E2E tests
+
 ## Security
 
 - All `{{ }}` text interpolation is HTML-escaped via `#esc()`
 - All dynamic attributes (`:src`, `:class`, etc.) are escaped via `#escAttr()`
 - `@html` is intentionally unescaped — use only with trusted data
 - Each component is wrapped in an IIFE for scope isolation
-
-## Roadmap
-
-- [x] TypeScript output (`--target ts` with `.d.ts` generation)
-- [x] Scoped CSS for `shadow: none` mode
-- [x] Comprehensive test suite (241 tests)
-- [x] XSS protection (auto-escape for text, attributes, and URLs)
-- [x] Rust compiler implementation (experimental, in `flare-compiler-rust/`)
-- [x] Source Map V3 support (`.js.map` generation for browser DevTools)
-- [x] Diff-based DOM rendering (morphdom-lite patching)
-- [ ] Language Server Protocol (LSP) for full TypeScript type checking inside `fn`
-- [ ] HMR (Hot Module Replacement) in dev server
-- [ ] SSR (Server-Side Rendering) support
-- [ ] npm package publishing
+- See [SECURITY.md](SECURITY.md) for vulnerability reporting
 
 ## License
 
