@@ -4,33 +4,38 @@ use crate::ast::{Block, BlockType};
 
 /// Phase 1: Split source into blocks (meta, script, template, style).
 pub fn split_blocks(source: &str) -> Vec<Block> {
-    let re = Regex::new(r"<(meta|script|template|style)(\s[^>]*)?>(?s)(.*?)</\1>").unwrap();
-    let mut blocks = Vec::new();
+    let tags = [
+        ("meta", BlockType::Meta),
+        ("script", BlockType::Script),
+        ("template", BlockType::Template),
+        ("style", BlockType::Style),
+    ];
 
-    for cap in re.captures_iter(source) {
-        let block_type = match &cap[1] {
-            "meta" => BlockType::Meta,
-            "script" => BlockType::Script,
-            "template" => BlockType::Template,
-            "style" => BlockType::Style,
-            _ => continue,
-        };
+    let mut blocks: Vec<(usize, Block)> = Vec::new();
 
-        let content = cap[3].to_string();
-        let start_line = source[..cap.get(0).unwrap().start()]
-            .chars()
-            .filter(|&c| c == '\n')
-            .count()
-            + 1;
+    for (tag, block_type) in &tags {
+        let pattern = format!(r"(?s)<{}(\s[^>]*)?>(.+?)</{}>", tag, tag);
+        let re = Regex::new(&pattern).unwrap();
+        for cap in re.captures_iter(source) {
+            let content = cap[2].to_string();
+            let byte_start = cap.get(0).unwrap().start();
+            let start_line = source[..byte_start]
+                .chars()
+                .filter(|&c| c == '\n')
+                .count()
+                + 1;
 
-        blocks.push(Block {
-            block_type,
-            content,
-            start_line,
-        });
+            blocks.push((byte_start, Block {
+                block_type: block_type.clone(),
+                content,
+                start_line,
+            }));
+        }
     }
 
-    blocks
+    // Sort by source order
+    blocks.sort_by_key(|(pos, _)| *pos);
+    blocks.into_iter().map(|(_, b)| b).collect()
 }
 
 #[cfg(test)]
