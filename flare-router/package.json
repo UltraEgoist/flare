@@ -1,7 +1,7 @@
 {
   "name": "@aspect/flare-router",
   "version": "0.1.0",
-  "description": "Client-side router for Flare SPA applications",
+  "description": "Client-side router for Flare SPA applications with hash-based routing, navigation guards, and dynamic parameters",
   "main": "index.js",
   "module": "index.mjs",
   "types": "index.d.ts",
@@ -23,10 +23,25 @@
     "router",
     "spa",
     "web-components",
-    "client-side-routing"
+    "client-side-routing",
+    "hash-routing",
+    "navigation-guards"
   ],
+  "author": "Aspect",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aspect/flare.git",
+    "directory": "flare-router"
+  },
+  "homepage": "https://github.com/aspect/flare#readme",
+  "bugs": {
+    "url": "https://github.com/aspect/flare/issues"
+  },
   "peerDependencies": {
     "@aspect/flare": ">=0.1.0"
   },
-  "license": "MIT"
+  "scripts": {
+    "test": "node --test test/router.test.js"
+  }
 }

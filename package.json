@@ -1,7 +1,7 @@
 {
   "name": "flare-monorepo",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Flare - Template-first Web Component language",
   "workspaces": [
     "flare-cli",
@@ -13,10 +13,19 @@
   ],
   "scripts": {
     "build": "cd flare-cli && npm run build",
-    "test": "node --test flare-cli/test/compiler.test.js && node --test flare-cli/test/cli.test.js && node --test vite-plugin-flare/test/plugin.test.js && node --test flare-router/test/router.test.js && node --test flare-store/test/store.test.js && node --test flare-ui/test/components.test.js",
+    "test": "node --test flare-cli/test/compiler.test.js flare-cli/test/cli.test.js flare-cli/test/e2e.test.js vite-plugin-flare/test/plugin.test.js flare-router/test/router.test.js flare-store/test/store.test.js flare-ui/test/components.test.js",
     "check": "cd examples && node ../flare-cli/bin/flare.js check",
     "lint": "node -c flare-cli/lib/compiler.js && node -c flare-cli/bin/flare.js && node -c flare-vscode/extension.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aspect/flare.git"
+  },
+  "homepage": "https://github.com/aspect/flare#readme",
+  "bugs": {
+    "url": "https://github.com/aspect/flare/issues"
+  },
+  "author": "Aspect",
   "license": "MIT",
   "volta": {
     "node": "22.12.0"

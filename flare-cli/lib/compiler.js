@@ -506,12 +506,30 @@ function parseScript(content, startLine) {
     // ─── Computed declarations ───
     // Format: computed varName: type = expression
     // Computed values are derived (read-only)
+    // Supports multi-line expressions (e.g., arrow functions with block bodies)
     if ((m = line.match(/^computed\s+(\w+)\s*:\s*([^=]+)\s*=\s*(.+)$/))) {
+      let expr = m[3].trim();
+      // Check if expression has unclosed braces (multi-line)
+      let braceDepth = 0;
+      for (const ch of expr) {
+        if (ch === '{') braceDepth++;
+        else if (ch === '}') braceDepth--;
+      }
+      // Continue reading lines until braces are balanced
+      while (braceDepth > 0 && i + 1 < lines.length) {
+        i++;
+        const nextLine = lines[i];
+        expr += '\n' + nextLine;
+        for (const ch of nextLine) {
+          if (ch === '{') braceDepth++;
+          else if (ch === '}') braceDepth--;
+        }
+      }
       decls.push({
         kind:'computed',
         name: m[1],
         type: parseType(m[2].trim()),
-        expr: m[3].trim(),  // Expression to compute
+        expr: expr,
         span: {line: ln}
       });
       i++; continue;
@@ -1728,28 +1746,29 @@ function generate(c, options) {
     allIds.sort((a, b) => b.length - a.length);
 
     // State variables: myVar -> this.#myVar
-    for(const s of sv) reps.push([new RegExp(`(?<!#)\\b${escRx(s)}\\b`,'g'), `this.#${s}`]);
+    // (?<![.#]) ensures we don't replace property accesses like obj.filter or already-prefixed #filter
+    for(const s of sv) reps.push([new RegExp(`(?<![.#])\\b${escRx(s)}\\b`,'g'), `this.#${s}`]);
 
     // Props: title -> this.#prop_title (props stored in separate fields)
-    for(const p of pv) reps.push([new RegExp(`(?<!#)\\b${escRx(p)}\\b`,'g'), `this.#prop_${p}`]);
+    for(const p of pv) reps.push([new RegExp(`(?<![.#])\\b${escRx(p)}\\b`,'g'), `this.#prop_${p}`]);
 
     // Computed: doubled -> this.#doubled (calls private getter)
-    for(const v of cv) reps.push([new RegExp(`(?<!#)\\b${escRx(v)}\\b`,'g'), `this.#${v}`]);
+    for(const v of cv) reps.push([new RegExp(`(?<![.#])\\b${escRx(v)}\\b`,'g'), `this.#${v}`]);
 
     // Emit: emit(change) -> this.#emit_change( (calls emit method)
-    for(const e of en) reps.push([new RegExp(`(?<!#)\\b${escRx(e)}\\(`,'g'), `this.#emit_${e}(`]);
+    for(const e of en) reps.push([new RegExp(`(?<![.#])\\b${escRx(e)}\\(`,'g'), `this.#emit_${e}(`]);
 
     // Functions: increment() -> this.#increment() (calls private method)
-    for(const f of fn) reps.push([new RegExp(`(?<!#)\\b${escRx(f)}\\(`,'g'), `this.#${f}(`]);
+    for(const f of fn) reps.push([new RegExp(`(?<![.#])\\b${escRx(f)}\\(`,'g'), `this.#${f}(`]);
 
     // Refs: inputEl -> this.#inputEl (access private ref field)
-    for(const ref of rn) reps.push([new RegExp(`(?<!#)\\b${escRx(ref)}\\b`,'g'), `this.#${ref}`]);
+    for(const ref of rn) reps.push([new RegExp(`(?<![.#])\\b${escRx(ref)}\\b`,'g'), `this.#${ref}`]);
 
     // Consume: user -> this.#user (access consumed context value)
-    for(const co of cons) reps.push([new RegExp(`(?<!#)\\b${escRx(co)}\\b`,'g'), `this.#${co}`]);
+    for(const co of cons) reps.push([new RegExp(`(?<![.#])\\b${escRx(co)}\\b`,'g'), `this.#${co}`]);
 
     // Const/Let: myConst -> this.#myConst (access private field)
-    for(const v of cn_vars) reps.push([new RegExp(`(?<!#)\\b${escRx(v)}\\b`,'g'), `this.#${v}`]);
+    for(const v of cn_vars) reps.push([new RegExp(`(?<![.#])\\b${escRx(v)}\\b`,'g'), `this.#${v}`]);
 
     // Form-associated helpers: setFormValue() -> this.#setFormValue(), setValidity() -> this.#setValidity()
     if (c.meta.form) {

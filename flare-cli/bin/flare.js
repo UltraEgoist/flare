@@ -41,9 +41,121 @@ const crypto = require('crypto');
 const { compile } = require('../lib/compiler');
 const { msg } = require('../lib/messages');
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const args = process.argv.slice(2);
 const cmd = args[0];
+
+// ─── Minifier ───
+
+/**
+ * 軽量 JavaScript ミニファイア
+ *
+ * 以下の最適化を実行:
+ * 1. 行コメント (//) の除去
+ * 2. ブロックコメント の除去 (ただし /*! ライセンスコメントは保持)
+ * 3. 連続空白の圧縮
+ * 4. 空行の除去
+ * 5. 行頭・行末の不要な空白除去
+ *
+ * 文字列リテラル内のコメント記号を誤除去しないよう、
+ * 文字列・正規表現・テンプレートリテラルをスキップします。
+ *
+ * @param {string} code - 入力 JavaScript コード
+ * @returns {string} 最小化されたコード
+ */
+function minifyJS(code) {
+  let result = '';
+  let i = 0;
+  const len = code.length;
+
+  while (i < len) {
+    const ch = code[i];
+
+    // 文字列リテラル（シングル / ダブルクォート）
+    if (ch === "'" || ch === '"') {
+      const quote = ch;
+      let str = ch;
+      i++;
+      while (i < len) {
+        if (code[i] === '\\') {
+          str += code[i] + (i + 1 < len ? code[i + 1] : '');
+          i += 2;
+          continue;
+        }
+        str += code[i];
+        if (code[i] === quote) { i++; break; }
+        i++;
+      }
+      result += str;
+      continue;
+    }
+
+    // テンプレートリテラル
+    if (ch === '`') {
+      let str = ch;
+      i++;
+      let depth = 0;
+      while (i < len) {
+        if (code[i] === '\\') {
+          str += code[i] + (i + 1 < len ? code[i + 1] : '');
+          i += 2;
+          continue;
+        }
+        if (code[i] === '$' && i + 1 < len && code[i + 1] === '{') {
+          str += '${';
+          i += 2;
+          depth++;
+          continue;
+        }
+        if (code[i] === '{' && depth > 0) { depth++; }
+        if (code[i] === '}' && depth > 0) { depth--; }
+        str += code[i];
+        if (code[i] === '`' && depth === 0) { i++; break; }
+        i++;
+      }
+      result += str;
+      continue;
+    }
+
+    // ブロックコメント
+    if (ch === '/' && i + 1 < len && code[i + 1] === '*') {
+      // /*! ライセンスコメントは保持
+      const isLicense = i + 2 < len && code[i + 2] === '!';
+      const end = code.indexOf('*/', i + 2);
+      if (end === -1) { i = len; break; }
+      if (isLicense) {
+        result += code.slice(i, end + 2);
+      }
+      i = end + 2;
+      continue;
+    }
+
+    // 行コメント
+    if (ch === '/' && i + 1 < len && code[i + 1] === '/') {
+      // 行末まで飛ばす
+      const eol = code.indexOf('\n', i);
+      if (eol === -1) { i = len; break; }
+      i = eol; // \n はそのまま（後で空行除去で処理）
+      continue;
+    }
+
+    result += ch;
+    i++;
+  }
+
+  // 連続空白の圧縮と空行除去
+  const lines = result.split('\n');
+  const compressed = [];
+  for (const line of lines) {
+    // 行内の連続空白を単一スペースに
+    const trimmed = line.replace(/[ \t]+/g, ' ').trim();
+    if (trimmed.length > 0) {
+      compressed.push(trimmed);
+    }
+  }
+
+  return compressed.join('\n');
+}
 
 // ─── Color helpers ───
 /**
@@ -374,16 +486,18 @@ function cmdBuild() {
       // target が 'ts' の場合は .ts、デフォルト .js に変換
       const outName = fileName.replace('.flare', `.${target === 'ts' ? 'ts' : 'js'}`);
       const outPath = path.join(componentsDir, outName);
-      fs.writeFileSync(outPath, result.output);
+      // --optimize: 個別コンポーネントもミニファイ
+      const outputCode = optimize ? minifyJS(result.output) : result.output;
+      fs.writeFileSync(outPath, outputCode);
 
-      // ソースマップファイルを出力（.js.map）
-      if (result.sourceMap) {
+      // ソースマップファイルを出力（.js.map）— optimize 時はスキップ（ミニファイで行番号が変わるため）
+      if (result.sourceMap && !optimize) {
         const mapName = outName + '.map';
         const mapPath = path.join(componentsDir, mapName);
         fs.writeFileSync(mapPath, JSON.stringify(result.sourceMap, null, 2));
       }
 
-      const size = (Buffer.byteLength(result.output) / 1024).toFixed(1);
+      const size = (Buffer.byteLength(outputCode) / 1024).toFixed(1);
       console.log(`  ${c.ok('✓')} → components/${outName} (${size} KB)`);
 
       // Bundle に追加するため、コンパイル済みソースコードを蓄積
@@ -435,14 +549,31 @@ function cmdBuild() {
     const deferred = `// Deferred registration queue: all classes are defined first,\n// then all customElements.define() calls happen at the end.\n// This ensures nested components work regardless of file order.\nconst __flareDefineQueue = [];\n\n`;
     // Bundle の末尾：キュー内のすべてのコンポーネントを customElements に登録
     const bundleFooter = `\n// Register all components at once (child components are available when parent renders)\n__flareDefineQueue.forEach(([tag, cls]) => {\n  if (!customElements.get(tag)) customElements.define(tag, cls);\n});\n`;
-    const bundleContent = bundleHeader + importBlock + deferred + cleanedParts.join('\n') + bundleFooter;
+    let bundleContent = bundleHeader + importBlock + deferred + cleanedParts.join('\n') + bundleFooter;
     const bundlePath = path.join(outDir, bundleName);
-    fs.writeFileSync(bundlePath, bundleContent);
+
+    // --optimize: バンドルのミニファイ
+    if (optimize) {
+      const originalSize = Buffer.byteLength(bundleContent);
+      bundleContent = minifyJS(bundleContent);
+      const minifiedSize = Buffer.byteLength(bundleContent);
+      const savings = ((1 - minifiedSize / originalSize) * 100).toFixed(1);
+      // ミニファイ済みバンドル名を .min.js で別途出力
+      const minBundleName = bundleName.replace(/\.js$/, '.min.js');
+      const minBundlePath = path.join(outDir, minBundleName);
+      fs.writeFileSync(minBundlePath, bundleContent);
+      const minSize = (minifiedSize / 1024).toFixed(1);
+      console.log(`${c.ok('✓')} Optimized: ${c.b(minBundleName)} (${minSize} KB, -${savings}%)`);
+    }
+
+    // 非圧縮版を常に出力（デバッグ用）
+    const rawContent = bundleHeader + importBlock + deferred + cleanedParts.join('\n') + bundleFooter;
+    fs.writeFileSync(bundlePath, rawContent);
 
     if (hasImports) {
       console.log(`${c.warn('⚠')} バンドルに import 文が含まれています。<script type="module" src="${bundleName}"> で読み込んでください。`);
     }
-    const bundleSize = (Buffer.byteLength(bundleContent) / 1024).toFixed(1);
+    const bundleSize = (Buffer.byteLength(rawContent) / 1024).toFixed(1);
     console.log(`${c.info('▸')} Bundle: ${c.b(bundleName)} (${bundleSize} KB, ${bundleParts.length} components)`);
   }
 

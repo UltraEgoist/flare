@@ -1,7 +1,7 @@
 {
   "name": "@aspect/flare-store",
   "version": "0.1.0",
-  "description": "Reactive global state management for Flare applications",
+  "description": "Reactive global state management for Flare applications with actions, getters, middleware, and undo/redo",
   "main": "index.js",
   "module": "index.mjs",
   "types": "index.d.ts",
@@ -23,7 +23,22 @@
     "store",
     "state-management",
     "reactive",
-    "web-components"
+    "web-components",
+    "flux",
+    "undo-redo"
   ],
-  "license": "MIT"
+  "author": "Aspect",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aspect/flare.git",
+    "directory": "flare-store"
+  },
+  "homepage": "https://github.com/aspect/flare#readme",
+  "bugs": {
+    "url": "https://github.com/aspect/flare/issues"
+  },
+  "scripts": {
+    "test": "node --test test/store.test.js"
+  }
 }

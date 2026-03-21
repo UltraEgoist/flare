@@ -4,12 +4,19 @@
   "description": "Flare - Template-first Web Component compiler. Compiles .flare template files into JavaScript Web Components.",
   "main": "lib/compiler.js",
   "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./lib/compiler.js",
+      "types": "./index.d.ts"
+    }
+  },
   "bin": {
     "flare": "./bin/flare.js"
   },
   "files": [
     "bin/",
-    "lib/"
+    "lib/",
+    "index.d.ts"
   ],
   "keywords": [
     "web-components",
@@ -17,15 +24,21 @@
     "template",
     "custom-elements",
     "flare-lang",
-    "javascript"
+    "javascript",
+    "shadow-dom",
+    "reactive"
   ],
   "author": "Aspect",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/aspect/flare.git"
+    "url": "https://github.com/aspect/flare.git",
+    "directory": "flare-cli"
   },
   "homepage": "https://github.com/aspect/flare#readme",
+  "bugs": {
+    "url": "https://github.com/aspect/flare/issues"
+  },
   "engines": {
     "node": ">=18.0.0"
   },

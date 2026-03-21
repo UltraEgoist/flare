@@ -14,22 +14,33 @@
   "sideEffects": true,
   "files": [
     "dist/",
-    "components/",
     "index.d.ts"
   ],
-  "scripts": {
-    "build": "node build.js",
-    "test": "node --test test/components.test.js"
-  },
   "keywords": [
     "flare",
     "ui",
     "components",
     "web-components",
-    "design-system"
+    "design-system",
+    "accessible",
+    "shadow-dom"
   ],
+  "author": "Aspect",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aspect/flare.git",
+    "directory": "flare-ui"
+  },
+  "homepage": "https://github.com/aspect/flare#readme",
+  "bugs": {
+    "url": "https://github.com/aspect/flare/issues"
+  },
   "peerDependencies": {
     "@aspect/flare": ">=0.1.0"
   },
-  "license": "MIT"
+  "scripts": {
+    "build": "node build.js",
+    "test": "node --test test/components.test.js"
+  }
 }

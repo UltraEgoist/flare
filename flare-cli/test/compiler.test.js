@@ -3750,3 +3750,53 @@ state count: number = 0
 });
 
 console.log('✓ All error boundary tests passed');
+
+// ─── Multi-line computed tests ───
+
+test('compile - multi-line computed expression with arrow function body', () => {
+  const src = `
+<meta>
+name: x-multi-computed
+</meta>
+<script>
+state items: string[] = ["a", "b", "c"]
+state filter: string = "all"
+
+computed filtered: string[] = items.filter(item => {
+  if (filter === "active") return item !== "b"
+  return true
+})
+</script>
+<template><p>{{ filtered.length }}</p></template>`;
+  const r = compile(src, 'x-multi-computed.flare');
+  assertSuccess(r);
+  // The getter should contain the multi-line filter expression
+  assert.ok(r.output.includes('.filter(item =>'), 'should have .filter(item => ...) not .this.#filter');
+  assert.ok(!r.output.includes('.this.#filter'), 'should not replace .filter() as state variable');
+  // Brace balance check
+  let depth = 0;
+  for (const ch of r.output) { if (ch === '{') depth++; if (ch === '}') depth--; }
+  assert.strictEqual(depth, 0, 'braces should be balanced');
+});
+
+test('compile - state variable name collision with JS method does not corrupt method calls', () => {
+  const src = `
+<meta>
+name: x-name-collision
+</meta>
+<script>
+state filter: string = "all"
+state items: string[] = []
+
+computed active: string[] = items.filter(i => i !== "done")
+</script>
+<template><p>{{ filter }} {{ active.length }}</p></template>`;
+  const r = compile(src, 'x-name-collision.flare');
+  assertSuccess(r);
+  // items.filter() should remain as method call
+  assert.ok(r.output.includes('.filter(i =>'), 'should keep .filter() as method call');
+  // standalone "filter" references should be replaced
+  assert.ok(r.output.includes('this.#filter'), 'should replace standalone filter with this.#filter');
+});
+
+console.log('✓ All multi-line computed tests passed');
