@@ -43,7 +43,7 @@ pub fn parse_script(content: &str, start_line: usize) -> Vec<Decl> {
 
         // import
         let re_import = Regex::new(
-            r"^import\s+(?:(\w+)\s+from\s+|(?:\{([^}]+)\})\s+from\s+)[""']([^""']+)[""']",
+            r#"^import\s+(?:(\w+)\s+from\s+|(?:\{([^}]+)\})\s+from\s+)["']([^"']+)["']"#,
         )
         .unwrap();
         if let Some(m) = re_import.captures(line) {
